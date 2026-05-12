@@ -86,3 +86,8 @@ CGC_VALUE_PROPOSITION.md
 # MkDocs
 docs/site/
 site/
+
+# Build Artifacts
+[Bb]in/
+[Oo]bj/
+target/
