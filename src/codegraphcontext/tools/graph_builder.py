@@ -339,6 +339,7 @@ class GraphBuilder:
                                 'class_name': item['class_context'],
                                 'func_name': item['name'],
                                 'func_line': item['line_number'],
+                                'lang': lang or '',
                             })
                         if item.get('context_type') == 'function_definition':
                             nested_fn_batch.append({
@@ -430,12 +431,19 @@ class GraphBuilder:
 
             # ── Batch: Class -[:CONTAINS]-> Function ──────────────────────────
             if class_fn_batch:
-                session.run("""
-                    UNWIND $batch AS row
-                    MATCH (c:Class {name: row.class_name, path: $file_path})
-                    MATCH (fn:Function {name: row.func_name, path: $file_path, line_number: row.func_line})
-                    MERGE (c)-[:CONTAINS]->(fn)
-                """, batch=class_fn_batch, file_path=file_path_str)
+                # C++ out-of-line methods (.cpp defines what .h declares) are handled
+                # in a dedicated post-pass (write_cpp_class_function_links) after ALL
+                # file nodes exist, so the Class match never fails due to ordering.
+                # Skip the cpp_batch here; only run the same-file pass for other langs.
+                _cpp_exts = ('.cpp', '.cc', '.cxx', '.c++', '.C')
+                other_batch = [] if file_path_str.endswith(_cpp_exts) else class_fn_batch
+                if other_batch:
+                    session.run("""
+                        UNWIND $batch AS row
+                        MATCH (c:Class {name: row.class_name, path: $file_path})
+                        MATCH (fn:Function {name: row.func_name, path: $file_path, line_number: row.func_line})
+                        MERGE (c)-[:CONTAINS]->(fn)
+                    """, batch=other_batch, file_path=file_path_str)
 
             # ── Batch: Nested Function -[:CONTAINS]-> Function ────────────────
             if nested_fn_batch:

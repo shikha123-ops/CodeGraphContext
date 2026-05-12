@@ -96,6 +96,13 @@ async def run_tree_sitter_index_async(
     t2 = time.time()
     info_logger(f"Function calls created in {t2 - t1:.1f}s. Total post-processing: {t2 - t0:.1f}s")
 
+    # ── C++: Class->Function edges (post-pass, after all files written) ───────
+    # C++ method definitions live in .cpp while the Class node lives in .h.
+    # The per-file write cannot create these edges reliably due to ordering;
+    # this single repo-scoped pass runs after every node is in the graph.
+    info_logger("[CPP] Linking C++ out-of-line method definitions to their classes...")
+    writer.write_cpp_class_function_links(resolved_repo_path_str)
+
     # ── Spring injection edges (#887) ─────────────────────────────────────────
     spring_inject_batch = []
     for fd in all_file_data:
