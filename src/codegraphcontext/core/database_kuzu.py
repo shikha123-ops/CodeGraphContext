@@ -106,7 +106,7 @@ class KuzuDBManager:
             ("Repository", "path STRING, name STRING, is_dependency BOOLEAN, indexed_at STRING, commit_hash STRING, PRIMARY KEY (path)"),
             ("File", "path STRING, name STRING, relative_path STRING, package_name STRING, is_dependency BOOLEAN, PRIMARY KEY (path)"),
             ("Directory", "path STRING, name STRING, PRIMARY KEY (path)"),
-            ("Module", "name STRING, lang STRING, full_import_name STRING, PRIMARY KEY (name)"),
+            ("Module", "name STRING, lang STRING, full_import_name STRING, path STRING, line_number INT64, PRIMARY KEY (name)"),
             # For types with composite keys (name, path, line_number), we use a 'uid'
             ("Function", "uid STRING, name STRING, path STRING, line_number INT64, end_line INT64, source STRING, docstring STRING, lang STRING, cyclomatic_complexity INT64, context STRING, context_type STRING, class_context STRING, class_context_line INT64, is_dependency BOOLEAN, decorators STRING[], args STRING[], http_method STRING, http_path STRING, PRIMARY KEY (uid)"),
             ("Class", "uid STRING, name STRING, path STRING, line_number INT64, end_line INT64, source STRING, docstring STRING, lang STRING, node_type STRING, is_dependency BOOLEAN, decorators STRING[], PRIMARY KEY (uid)"),
@@ -120,7 +120,12 @@ class KuzuDBManager:
             ("Annotation", "uid STRING, name STRING, path STRING, line_number INT64, end_line INT64, source STRING, docstring STRING, lang STRING, is_dependency BOOLEAN, PRIMARY KEY (uid)"),
             ("Record", "uid STRING, name STRING, path STRING, line_number INT64, end_line INT64, source STRING, docstring STRING, lang STRING, is_dependency BOOLEAN, PRIMARY KEY (uid)"),
             ("Property", "uid STRING, name STRING, path STRING, line_number INT64, end_line INT64, source STRING, docstring STRING, lang STRING, is_dependency BOOLEAN, PRIMARY KEY (uid)"),
-            ("Parameter", "uid STRING, name STRING, path STRING, function_line_number INT64, PRIMARY KEY (uid)")
+            ("Parameter", "uid STRING, name STRING, path STRING, function_line_number INT64, PRIMARY KEY (uid)"),
+            ("Mixin", "uid STRING, name STRING, path STRING, line_number INT64, end_line INT64, source STRING, docstring STRING, lang STRING, is_dependency BOOLEAN, PRIMARY KEY (uid)"),
+            ("Extension", "uid STRING, name STRING, path STRING, line_number INT64, end_line INT64, source STRING, docstring STRING, lang STRING, is_dependency BOOLEAN, PRIMARY KEY (uid)"),
+            ("Object", "uid STRING, name STRING, path STRING, line_number INT64, end_line INT64, source STRING, docstring STRING, lang STRING, is_dependency BOOLEAN, PRIMARY KEY (uid)"),
+            ("DbTable", "name STRING, fqn STRING, datasource_name STRING, path STRING, PRIMARY KEY (name)"),
+            ("ExternalClass", "name STRING, path STRING, PRIMARY KEY (name)")
         ]
         
         # rel_tables: list of (table_name, schema, use_group)
@@ -131,26 +136,57 @@ class KuzuDBManager:
             # keywords in CREATE REL TABLE statements. We must escape them with backticks
             # or the rel table creation will fail silently, leading to runtime
             # "Binder exception: Table CONTAINS does not exist".
-            ("CONTAINS", "FROM File TO Function, FROM File TO Class, FROM File TO Variable, FROM File TO Trait, FROM File TO Interface, FROM `Macro` TO `Macro`, FROM File TO `Macro`, FROM File TO Struct, FROM File TO Enum, FROM File TO `Union`, FROM File TO Annotation, FROM File TO Record, FROM File TO `Property`, FROM Repository TO Directory, FROM Directory TO Directory, FROM Directory TO File, FROM Repository TO File, FROM Class TO Function, FROM Function TO Function", True),
+            ("CONTAINS", """
+                FROM File TO Function, FROM File TO Class, FROM File TO Variable, FROM File TO Trait, FROM File TO Interface, 
+                FROM File TO `Macro`, FROM File TO Struct, FROM File TO Enum, FROM File TO `Union`, FROM File TO Annotation, 
+                FROM File TO Record, FROM File TO `Property`, FROM File TO Mixin, FROM File TO Extension, FROM File TO Module, 
+                FROM File TO Object,
+                FROM Repository TO Directory, FROM Directory TO Directory, FROM Directory TO File, FROM Repository TO File, 
+                FROM Class TO Function, FROM Module TO Function, FROM Interface TO Function, FROM Struct TO Function, 
+                FROM Record TO Function, FROM Trait TO Function, FROM Object TO Function, FROM Mixin TO Function,
+                FROM Extension TO Function, FROM Class TO Class, FROM Class TO Interface, FROM Class TO Struct, 
+                FROM Class TO Variable, FROM Module TO Class, FROM Module TO Module, FROM `Macro` TO `Macro`, FROM Function TO Function
+            """, True),
             ("CALLS", """
-                FROM Function TO Function, FROM Function TO Class, FROM Function TO Interface, FROM Function TO Trait, FROM Function TO Struct, FROM Function TO Enum, FROM Function TO `Record`, FROM Function TO `Union`,
-                FROM Class TO Function, FROM Class TO Class, FROM Class TO Interface, FROM Class TO Trait, FROM Class TO Struct, FROM Class TO Enum, FROM Class TO `Record`, FROM Class TO `Union`,
+                FROM Function TO Function, FROM Function TO Class, FROM Function TO Interface, FROM Function TO Trait, 
+                FROM Function TO Struct, FROM Function TO Enum, FROM Function TO Record, FROM Function TO `Union`,
+                FROM Function TO Mixin, FROM Function TO Extension, FROM Function TO Object,
+                FROM Class TO Function, FROM Class TO Class, FROM Class TO Interface, FROM Class TO Trait, 
+                FROM Class TO Struct, FROM Class TO Enum, FROM Class TO Record, FROM Class TO `Union`,
                 FROM Interface TO Function, FROM Interface TO Class, FROM Interface TO Interface,
-                FROM File TO Function, FROM File TO Class, FROM File TO Interface, FROM File TO Trait, FROM File TO Struct, FROM File TO Enum, FROM File TO `Record`, FROM File TO `Union`,
-                line_number INT64, args STRING[], full_call_name STRING, confidence DOUBLE, resolution_tier INT64, confidence_label STRING, source STRING, resolution_method STRING, called_name STRING
+                FROM Trait TO Function, FROM Trait TO Class, FROM Trait TO Interface,
+                FROM Mixin TO Function, FROM Mixin TO Class, FROM Mixin TO Interface,
+                FROM Extension TO Function, FROM Extension TO Class, FROM Extension TO Interface,
+                FROM Object TO Function, FROM Object TO Class, FROM Object TO Interface,
+                FROM `Union` TO Function, FROM `Union` TO Class, FROM `Union` TO Interface,
+                FROM `Macro` TO Function, FROM `Macro` TO Class, FROM `Macro` TO Interface,
+                FROM File TO Function, FROM File TO Class, FROM File TO Interface, FROM File TO Trait, 
+                FROM File TO Struct, FROM File TO Enum, FROM File TO Record, FROM File TO `Union`,
+                FROM Variable TO Function, FROM Variable TO Class, FROM Variable TO Interface,
+                line_number INT64, args STRING[], full_call_name STRING, confidence DOUBLE, resolution_tier INT64, 
+                confidence_label STRING, source STRING, resolution_method STRING, called_name STRING
             """, True),
             ("IMPORTS", "FROM File TO Module, alias STRING, full_import_name STRING, imported_name STRING, line_number INT64", False),
             ("INHERITS", """
-                FROM Class TO Class, FROM Class TO Interface, FROM Class TO Trait,
-                FROM `Record` TO `Record`, FROM `Record` TO Interface,
-                FROM Interface TO Interface, FROM Interface TO Trait,
-                FROM Struct TO Interface, FROM Struct TO Trait,
+                FROM Class TO Class, FROM Class TO Interface, FROM Class TO Trait, FROM Class TO Mixin, FROM Class TO Extension, FROM Class TO ExternalClass, FROM Class TO Struct, FROM Class TO Enum, FROM Class TO `Union`, FROM Class TO Record, FROM Class TO Object,
+                FROM Trait TO Trait, FROM Trait TO Interface, FROM Trait TO ExternalClass, FROM Trait TO Class,
+                FROM Interface TO Interface, FROM Interface TO Trait, FROM Interface TO ExternalClass, FROM Interface TO Class,
+                FROM Struct TO Interface, FROM Struct TO Trait, FROM Struct TO ExternalClass, FROM Struct TO Struct, FROM Struct TO Class,
+                FROM Record TO Record, FROM Record TO Interface, FROM Record TO ExternalClass, FROM Record TO Class, FROM Record TO Struct,
+                FROM Mixin TO Mixin, FROM Mixin TO Interface, FROM Mixin TO ExternalClass, FROM Mixin TO Class,
+                FROM Extension TO Extension, FROM Extension TO Interface, FROM Extension TO ExternalClass, FROM Extension TO Class,
+                FROM Enum TO Class, FROM Enum TO Interface, FROM Enum TO ExternalClass, FROM Enum TO Enum,
+                FROM `Union` TO Class, FROM `Union` TO Interface, FROM `Union` TO ExternalClass, FROM `Union` TO `Union`,
+                FROM Module TO Module, FROM Module TO ExternalClass, FROM Object TO Object, FROM Object TO ExternalClass, FROM Object TO Class,
                 confidence_label STRING
             """, True),
             ("HAS_PARAMETER", "FROM Function TO Parameter", False),
             ("INCLUDES", "FROM Class TO Module", False),
-            ("IMPLEMENTS", "FROM Class TO Interface, FROM Struct TO Interface, FROM Record TO Interface", True),
-            ("INJECTS", "FROM Class TO Class, field_name STRING, inject_line INT64, confidence_label STRING", False)
+            ("IMPLEMENTS", "FROM Class TO Interface, FROM Struct TO Interface, FROM Record TO Interface, FROM Mixin TO Interface, FROM Extension TO Interface, FROM Enum TO Interface, FROM Object TO Interface, FROM `Union` TO Interface, FROM Trait TO Interface", True),
+            ("INJECTS", "FROM Class TO Class, field_name STRING, inject_line INT64, confidence_label STRING", False),
+            ("MAPS_TO", "FROM Class TO DbTable, datastore STRING, line_number INT64", False),
+            ("READS", "FROM Function TO DbTable, line_number INT64", False),
+            ("WRITES", "FROM Function TO DbTable, line_number INT64", False)
         ]
 
         for table_name, schema in node_tables:
@@ -181,6 +217,10 @@ class KuzuDBManager:
         simple_migrations = [
             ("File", "package_name", "STRING"),
             ("Module", "full_import_name", "STRING"),
+            ("Module", "path", "STRING"),
+            ("Module", "line_number", "INT64"),
+            ("DbTable", "path", "STRING"),
+            ("ExternalClass", "path", "STRING"),
             ("IMPORTS", "full_import_name", "STRING"),
             ("IMPORTS", "imported_name", "STRING"),
             # Freshness properties added to Repository in 0.4.8

@@ -104,7 +104,7 @@ class GraphWriter:
                 current_path_str = str(Path(parent_path) / part)
                 session.run(
                     f"""
-                    MATCH (p:{parent_label} {{path: $parent_path}})
+                    MATCH (p:`{parent_label}` {{path: $parent_path}})
                     MERGE (d:Directory {{path: $current_path}})
                     SET d.name = $part
                     MERGE (p)-[:CONTAINS]->(d)
@@ -117,7 +117,7 @@ class GraphWriter:
                 parent_label = "Directory"
             session.run(
                 f"""
-                MATCH (p:{parent_label} {{path: $parent_path}})
+                MATCH (p:`{parent_label}` {{path: $parent_path}})
                 MATCH (f:File {{path: $path}})
                 MERGE (p)-[:CONTAINS]->(f)
             """,
@@ -270,18 +270,25 @@ class GraphWriter:
                 )
 
             if class_fn_batch:
-                session.run(
-                    """
-                    UNWIND $batch AS row
-                    MATCH (c {name: row.class_name, path: $file_path})
-                    WHERE c:Class OR c:Module OR c:Interface OR c:Struct OR c:Record OR c:Trait OR c:Object OR c:Mixin
-                    MATCH (fn:Function {name: row.func_name, path: $file_path, line_number: row.func_line})
-                    WHERE row.class_line < 0 OR c.line_number = row.class_line
-                    MERGE (c)-[:CONTAINS]->(fn)
-                """,
-                    batch=class_fn_batch,
-                    file_path=file_path_str,
-                )
+                # KuzuDB requires deterministic node labels for relationship creation.
+                # We split the multi-label MATCH into individual queries.
+                for label in ("Class", "Module", "Interface", "Struct", "Record", "Trait", "Object", "Mixin"):
+                    try:
+                        session.run(
+                            f"""
+                            UNWIND $batch AS row
+                            MATCH (c:`{label}` {{name: row.class_name, path: $file_path}})
+                            MATCH (fn:Function {{name: row.func_name, path: $file_path, line_number: row.func_line}})
+                            WHERE row.class_line < 0 OR c.line_number = row.class_line
+                            MERGE (c)-[:CONTAINS]->(fn)
+                            """,
+                            batch=class_fn_batch,
+                            file_path=file_path_str,
+                        )
+                    except Exception as e:
+                        if "Binder exception" in str(e):
+                            continue
+                        raise e
 
 
             if nested_fn_batch:
@@ -490,7 +497,7 @@ class GraphWriter:
                     q = f"""
                         UNWIND $batch AS row
                         MATCH (caller:File {{path: row.caller_file_path}})
-                        MATCH (called:{called_label} {{name: row.called_name, path: row.called_file_path}})
+                        MATCH (called:`{called_label}` {{name: row.called_name, path: row.called_file_path}})
                         WHERE row.called_line_number < 0 OR called.line_number = row.called_line_number
                         MERGE (caller)-[c:CALLS {{line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}}]->(called)
                         SET c.confidence = row.confidence, c.resolution_tier = row.resolution_tier,
@@ -499,8 +506,8 @@ class GraphWriter:
                 else:
                     q = f"""
                         UNWIND $batch AS row
-                        MATCH (caller:{caller_label} {{name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number}})
-                        MATCH (called:{called_label} {{name: row.called_name, path: row.called_file_path}})
+                        MATCH (caller:`{caller_label}` {{name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number}})
+                        MATCH (called:`{called_label}` {{name: row.called_name, path: row.called_file_path}})
                         WHERE row.called_line_number < 0 OR called.line_number = row.called_line_number
                         MERGE (caller)-[c:CALLS {{line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}}]->(called)
                         SET c.confidence = row.confidence, c.resolution_tier = row.resolution_tier,
@@ -510,7 +517,13 @@ class GraphWriter:
                 t0 = time.time()
                 for i in range(0, len(batch_data), batch_size):
                     batch = batch_data[i : i + batch_size]
-                    session.run(q, batch=batch)
+                    try:
+                        session.run(q, batch=batch)
+                    except Exception as e:
+                        if "Binder exception" in str(e):
+                            # Skip unsupported label combinations in KuzuDB
+                            continue
+                        raise e
                 info_logger(f"[CALLS] {caller_label}-to-{called_label}: {len(batch_data)} edges written in {time.time()-t0:.1f}s")
 
         info_logger("[CALLS] All relationships processed.")
@@ -552,30 +565,33 @@ class GraphWriter:
                     base_index = type_item["bases"].index(base_str)
 
                     if is_interface or (base_index > 0 and type_label == "Class"):
-                        session.run(
-                            """
-                            MATCH (child {name: $child_name, path: $path})
-                            WHERE child:Class OR child:Struct OR child:Record OR child:Mixin OR child:Extension
-                            MATCH (iface:Interface {name: $interface_name})
-                            MERGE (child)-[:IMPLEMENTS]->(iface)
-                        """,
-                            child_name=type_item["name"],
-                            path=caller_file_path,
-                            interface_name=base_name,
-                        )
+                        # Split by label for Kuzu binder
+                        for clab in ("Class", "Struct", "Record", "Mixin", "Extension"):
+                            session.run(
+                                f"""
+                                MATCH (child:`{clab}` {{name: $child_name, path: $path}})
+                                MATCH (iface:Interface {{name: $interface_name}})
+                                MERGE (child)-[:IMPLEMENTS]->(iface)
+                            """,
+                                child_name=type_item["name"],
+                                path=caller_file_path,
+                                interface_name=base_name,
+                            )
                     else:
-                        session.run(
-                            """
-                            MATCH (child {name: $child_name, path: $path})
-                            WHERE child:Class OR child:Record OR child:Interface OR child:Mixin OR child:Extension
-                            MATCH (parent {name: $parent_name})
-                            WHERE parent:Class OR parent:Record OR parent:Interface OR parent:Mixin OR parent:Extension
-                            MERGE (child)-[:INHERITS]->(parent)
-                        """,
-                            child_name=type_item["name"],
-                            path=caller_file_path,
-                            parent_name=base_name,
-                        )
+                        child_labels = ("Class", "Record", "Interface", "Mixin", "Extension")
+                        parent_labels = ("Class", "Record", "Interface", "Mixin", "Extension")
+                        for clab in child_labels:
+                            for plab in parent_labels:
+                                session.run(
+                                    f"""
+                                    MATCH (child:`{clab}` {{name: $child_name, path: $path}})
+                                    MATCH (parent:`{plab}` {{name: $parent_name}})
+                                    MERGE (child)-[:INHERITS]->(parent)
+                                """,
+                                    child_name=type_item["name"],
+                                    path=caller_file_path,
+                                    parent_name=base_name,
+                                )
 
     def write_inheritance_links(
         self,
@@ -592,35 +608,44 @@ class GraphWriter:
             external_batch = [r for r in inheritance_batch if r.get("resolved_parent_file_path") == "__external__"]
 
             # Internal inheritance (within workspace)
-            for i in range(0, len(internal_batch), batch_size):
-                batch = internal_batch[i : i + batch_size]
-                session.run(
-                    """
-                    UNWIND $batch AS row
-                    MATCH (child {name: row.child_name, path: row.path})
-                    WHERE child:Class OR child:Trait OR child:Interface OR child:Struct OR child:Enum OR child:Union OR child:Record OR child:Mixin OR child:Extension OR child:Module OR child:Object
-                    MATCH (parent {name: row.parent_name, path: row.resolved_parent_file_path})
-                    WHERE parent:Class OR parent:Trait OR parent:Interface OR parent:Struct OR parent:Enum OR parent:Union OR parent:Record OR parent:Mixin OR parent:Extension OR parent:Module OR parent:Object
-                    MERGE (child)-[r:INHERITS]->(parent)
-                    SET r.confidence_label = coalesce(row.confidence_label, 'EXTRACTED')
-                """,
-                    batch=batch,
-                )
+            # KuzuDB binder requires explicit labels on both sides of a relationship creation.
+            # We iterate over labels to ensure each MERGE targets a single sub-table of the INHERITS group.
+            labels = ("Class", "Trait", "Interface", "Struct", "Enum", "Union", "Record", "Mixin", "Extension", "Module", "Object")
+            for child_label in labels:
+                for parent_label in labels:
+                    try:
+                        session.run(
+                            f"""
+                            UNWIND $batch AS row
+                            MATCH (child:`{child_label}` {{name: row.child_name, path: row.path}})
+                            MATCH (parent:`{parent_label}` {{name: row.parent_name, path: row.resolved_parent_file_path}})
+                            MERGE (child)-[r:INHERITS]->(parent)
+                            SET r.confidence_label = coalesce(row.confidence_label, 'EXTRACTED')
+                        """,
+                            batch=internal_batch,
+                        )
+                    except Exception as e:
+                        if "Binder exception" in str(e):
+                            continue
+                        raise e
 
             # External inheritance (outside workspace)
-            for i in range(0, len(external_batch), batch_size):
-                batch = external_batch[i : i + batch_size]
-                session.run(
-                    """
-                    UNWIND $batch AS row
-                    MATCH (child {name: row.child_name, path: row.path})
-                    WHERE child:Class OR child:Trait OR child:Interface OR child:Struct OR child:Enum OR child:Union OR child:Record OR child:Mixin OR child:Extension OR child:Module OR child:Object
-                    MERGE (parent:ExternalClass {name: row.parent_name})
-                    MERGE (child)-[r:INHERITS]->(parent)
-                    SET r.confidence_label = coalesce(row.confidence_label, 'INFERRED')
-                """,
-                    batch=batch,
-                )
+            for child_label in labels:
+                try:
+                    session.run(
+                        f"""
+                        UNWIND $batch AS row
+                        MATCH (child:`{child_label}` {{name: row.child_name, path: row.path}})
+                        MERGE (parent:ExternalClass {{name: row.parent_name}})
+                        MERGE (child)-[r:INHERITS]->(parent)
+                        SET r.confidence_label = coalesce(row.confidence_label, 'INFERRED')
+                        """,
+                        batch=external_batch,
+                    )
+                except Exception as e:
+                    if "Binder exception" in str(e):
+                        continue
+                    raise e
 
 
             for file_data in csharp_files:
@@ -634,43 +659,45 @@ class GraphWriter:
         with self.driver.session() as session:
             for file_data in files_data.values():
                 # ── Code-level caller → Any code-level callee ────────────────
+                caller_labels = ("Function", "Variable", "Class", "Interface", "Trait", "Struct", "Record", "Union", "Mixin", "Extension")
+                callee_labels = ("Function", "Class", "Interface", "Trait", "Struct", "Enum", "Record", "Union", "Mixin", "Extension")
                 for edge in file_data.get("function_calls_scip", []):
-                    try:
-                        session.run(
-                            """
-                            MATCH (caller {name: $caller_name, path: $caller_file, line_number: $caller_line})
-                            WHERE caller:Function OR caller:Variable OR caller:Class OR caller:Interface OR caller:Trait OR caller:Struct OR caller:Record OR caller:Union OR caller:Mixin OR caller:Extension
-                            MATCH (callee {name: $callee_name, path: $callee_file})
-                            WHERE callee:Function OR callee:Class OR callee:Interface OR callee:Trait OR callee:Struct OR callee:Enum OR callee:Record OR callee:Union OR callee:Mixin OR callee:Extension
-                            MERGE (caller)-[:CALLS {line_number: $ref_line, source: 'scip'}]->(callee)
-                        """,
-                            caller_name=name_from_symbol(edge["caller_symbol"]),
-                            caller_file=edge["caller_file"],
-                            caller_line=edge["caller_line"],
-                            callee_name=edge["callee_name"],
-                            callee_file=edge["callee_file"],
-                            ref_line=edge["ref_line"],
-                        )
-                    except Exception as e:
-                        warning_logger(f"Failed to write SCIP call edge: {e}")
+                    for clab in caller_labels:
+                        for calab in callee_labels:
+                            try:
+                                session.run(
+                                    f"""
+                                    MATCH (caller:`{clab}` {{name: $caller_name, path: $caller_file, line_number: $caller_line}})
+                                    MATCH (callee:`{calab}` {{name: $callee_name, path: $callee_file}})
+                                    MERGE (caller)-[:CALLS {{line_number: $ref_line, source: 'scip'}}]->(callee)
+                                """,
+                                    caller_name=name_from_symbol(edge["caller_symbol"]),
+                                    caller_file=edge["caller_file"],
+                                    caller_line=edge["caller_line"],
+                                    callee_name=edge["callee_name"],
+                                    callee_file=edge["callee_file"],
+                                    ref_line=edge["ref_line"],
+                                )
+                            except Exception as e:
+                                warning_logger(f"Failed to write SCIP call edge: {e}")
 
                 # ── Module-level (top-level) caller → Any code-level callee ─
                 for edge in file_data.get("module_level_calls_scip", []):
-                    try:
-                        session.run(
-                            """
-                            MATCH (caller:File {path: $caller_file})
-                            MATCH (callee {name: $callee_name, path: $callee_file})
-                            WHERE callee:Function OR callee:Class OR callee:Interface OR callee:Trait OR callee:Struct OR callee:Enum OR callee:Record OR callee:Union
-                            MERGE (caller)-[:CALLS {line_number: $ref_line, source: 'scip'}]->(callee)
-                        """,
-                            caller_file=edge["caller_file"],
-                            callee_name=edge["callee_name"],
-                            callee_file=edge["callee_file"],
-                            ref_line=edge["ref_line"],
-                        )
-                    except Exception as e:
-                        warning_logger(f"Failed to write SCIP module-level call edge: {e}")
+                    for calab in callee_labels:
+                        try:
+                            session.run(
+                                f"""
+                                MATCH (caller:File {{path: $caller_file}})
+                                MATCH (callee:`{calab}` {{name: $callee_name, path: $callee_file}})
+                                MERGE (caller)-[:CALLS {{line_number: $ref_line, source: 'scip'}}]->(callee)
+                            """,
+                                caller_file=edge["caller_file"],
+                                callee_name=edge["callee_name"],
+                                callee_file=edge["callee_file"],
+                                ref_line=edge["ref_line"],
+                            )
+                        except Exception as e:
+                            warning_logger(f"Failed to write SCIP module-level call edge: {e}")
 
     def delete_file_from_graph(self, path: str) -> None:
         file_path_str = str(Path(path).resolve())
@@ -720,19 +747,24 @@ class GraphWriter:
         """
         _cpp_exts = ('.cpp', '.cc', '.cxx', '.c++', '.C')
         ext_conditions = ' OR '.join(f'fn.path ENDS WITH "{ext}"' for ext in _cpp_exts)
-        query = f"""
-            MATCH (fn:Function)
-            WHERE fn.path STARTS WITH $repo_path
-              AND fn.class_context IS NOT NULL
-              AND ({ext_conditions})
-            MATCH (c)
-            WHERE c.name = fn.class_context
-              AND (c:Class OR c:Struct OR c:Module)
-              AND c.path STARTS WITH $repo_path
-            MERGE (c)-[:CONTAINS]->(fn)
-        """
+        
+        container_labels = ("Class", "Struct", "Module")
         with self.driver.session() as session:
-            session.run(query, repo_path=repo_path_str)
+            for clab in container_labels:
+                query = f"""
+                    MATCH (fn:Function)
+                    WHERE fn.path STARTS WITH $repo_path
+                      AND fn.class_context IS NOT NULL
+                      AND ({ext_conditions})
+                    MATCH (c:`{clab}`)
+                    WHERE c.name = fn.class_context
+                      AND c.path STARTS WITH $repo_path
+                    MERGE (c)-[:CONTAINS]->(fn)
+                """
+                try:
+                    session.run(query, repo_path=repo_path_str)
+                except Exception as e:
+                    debug_log(f"Failed to link C++ methods for label {clab}: {e}")
 
     def write_spring_inject_links(self, inject_batch: List[Dict[str, Any]]) -> None:
         """Create INJECTS edges: injector Class -> injected Class (via @Autowired / @Inject)."""
@@ -1193,12 +1225,12 @@ class GraphWriter:
                 break
             info_logger(f"[DELETE] Removed {deleted} CONTAINS rels for {repo_path_str}")
 
-        for label in ("Function", "Class", "Interface", "Trait", "Struct", "Enum", "Variable", "Macro", "Union", "Record", "Property", "File", "Module", "Mixin", "Extension"):
+        for label in ("Function", "Class", "Interface", "Trait", "Struct", "Enum", "Variable", "Macro", "Union", "Record", "Property", "File", "Module", "Mixin", "Extension", "Object", "Parameter", "Directory", "Repository", "ExternalClass", "DbTable"):
 
             while True:
                 with self.driver.session() as session:
                     result = session.run(
-                        f"MATCH (n:{label}) WHERE n.path STARTS WITH $prefix "
+                        f"MATCH (n:`{label}`) WHERE n.path STARTS WITH $prefix "
                         "WITH n LIMIT 10000 DETACH DELETE n RETURN count(n) AS deleted",
                         prefix=path_prefix,
                     ).single()

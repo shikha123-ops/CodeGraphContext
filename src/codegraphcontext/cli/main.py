@@ -2552,12 +2552,22 @@ def main(
         "-h",
         help="[Root-level only] Show help and exit",
         is_eager=True,
-    ), 
+    ),
+    db_path: Optional[str] = typer.Option(
+        None,
+        "--path",
+        "--db-path",
+        help="[Global] Temporarily override database path (for local DBs like KuzuDB)"
+    ),
 ):
     """
     Main entry point for the cgc CLI application.
     If no subcommand is provided, it displays a welcome message with instructions.
     """
+    if db_path:
+        os.environ["CGC_RUNTIME_DB_PATH"] = db_path
+    if database:
+        os.environ["CGC_RUNTIME_DB_TYPE"] = database
     # Initialize context object for sharing state with subcommands
     ctx.ensure_object(dict)
     

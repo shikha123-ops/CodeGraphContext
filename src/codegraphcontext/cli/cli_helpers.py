@@ -87,8 +87,9 @@ def _initialize_services(cli_context_flag: Optional[str] = None) -> tuple[Any, A
         ):
             os.environ["DEFAULT_DATABASE"] = ctx.database
         
-        # Pass the exact DB path resolved from the context
-        db_manager = get_database_manager(db_path=ctx.db_path)
+        # Pass the exact DB path resolved from the context, or the runtime override
+        runtime_path = os.getenv("CGC_RUNTIME_DB_PATH")
+        db_manager = get_database_manager(db_path=runtime_path or ctx.db_path)
     except ValueError as e:
         console.print(f"[bold red]Database Configuration Error:[/bold red] {e}")
         return None, None, None, ctx
