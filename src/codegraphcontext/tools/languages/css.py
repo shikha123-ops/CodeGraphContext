@@ -27,11 +27,10 @@ class CSSTreeSitterParser:
         variables = []
 
         query_str = """
-            (class_selector (class_name) @class_name) @selector
-            (id_selector (id_name) @id_name) @selector
+            (class_selector (class_name) @class_name)
+            (id_selector (id_name) @id_name)
             (tag_name) @tag_name
             (import_statement (string_value) @import_path)
-            (variable_declaration (variable_name) @var_name (value) @var_value)
         """
 
         for node, capture_name in execute_query(self.language, query_str, root_node):

@@ -33,15 +33,6 @@ def _confidence_label(tier: int, is_unresolved_external: bool) -> str:
     return "INFERRED"
 
 
-def _confidence_label(tier: int, is_unresolved_external: bool) -> str:
-    """Map a resolution tier to EXTRACTED / INFERRED / AMBIGUOUS."""
-    if is_unresolved_external or tier >= 8:
-        return "AMBIGUOUS"
-    if tier in (1, 2, 5, 6):
-        return "EXTRACTED"
-    return "INFERRED"
-
-
 def resolve_function_call(
     call: Dict[str, Any],
     caller_file_path: str,
@@ -68,7 +59,6 @@ def resolve_function_call(
 
     resolved_called_name = called_name
     resolved_path = None
-    resolved_called_name = called_name
     resolution_tier = 9
     full_call = call.get("full_name", called_name)
     base_obj = full_call.split(".")[0] if "." in full_call else None
@@ -1726,7 +1716,7 @@ def build_function_call_groups(
                 "go":         {".go"},
                 "rust":       {".rs"},
                 "cpp":        {".cpp", ".h", ".hpp", ".hh"},
-                "c":          {".c"},
+                "c":          {".c", ".h"},
                 "c_sharp":    {".cs"},
                 # Kotlin/JVM projects routinely call Java classes directly; keep
                 # Java targets so explicit Java imports can disambiguate receivers.
