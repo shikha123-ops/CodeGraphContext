@@ -50,6 +50,34 @@ const isPathIgnored = (path: string) => {
   return parts.some(part => IGNORED_DIRS.has(part));
 };
 
+const fetchWithFallbackProxies = async (url: string): Promise<Response> => {
+  if (!url) throw new Error("URL is empty");
+  
+  try {
+    const res = await fetch(url);
+    if (res.ok) return res;
+  } catch (e) {
+    console.warn("Direct fetch failed, falling back to CORS proxies...", e);
+  }
+  
+  const proxies = [
+    (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`
+  ];
+
+  let lastError: any = null;
+  for (const proxy of proxies) {
+    try {
+      const res = await fetch(proxy(url));
+      if (res.ok) return res;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error("Failed to fetch via proxies");
+};
+
 export default function LocalUploader({ onComplete }: { onComplete: (data: unknown) => void }) {
   const [isParsing, setIsParsing] = useState(false);
   const [progress, setProgress] = useState({ text: "", value: 0 });
@@ -284,53 +312,138 @@ export default function LocalUploader({ onComplete }: { onComplete: (data: unkno
     }
     
     setIsParsing(true);
-    setProgress({ text: "Fetching repository tree...", value: 10 });
+    setProgress({ text: "Fetching repository...", value: 10 });
+    
+    let files: any[] = [];
+    
     try {
+      // --- METHOD 1: ZIP ARCHIVE FLOW (PRIMARY & HIGHLY OPTIMIZED) ---
       const match = githubUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
       if (!match) throw new Error("Invalid GitHub URL");
       const [_, owner, repo] = match;
       
-      const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/main?recursive=1`;
-      let res = await fetch(treeUrl);
+      setProgress({ text: "Downloading repository zip archive (highly optimized)...", value: 15 });
       
-      // Fallback for master branch
-      if (!res.ok) {
-         const masterUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/master?recursive=1`;
-         res = await fetch(masterUrl);
+      let response = null;
+
+      // TIER 1: Standard Web Archive ZIP via CORS Proxies
+      try {
+        console.log("[LocalUploader] Tier 1: Fetching standard web ZIP archive via proxies...");
+        const zipUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`;
+        response = await fetchWithFallbackProxies(zipUrl);
+        if (!response || !response.ok) throw new Error(`Status ${response?.status}`);
+      } catch (err1) {
+        console.warn("[LocalUploader] Tier 1 main.zip failed, trying master.zip...", err1);
+        try {
+          const fallbackZipUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/master.zip`;
+          response = await fetchWithFallbackProxies(fallbackZipUrl);
+          if (!response || !response.ok) throw new Error(`Status ${response?.status}`);
+        } catch (err2) {
+          console.warn("[LocalUploader] Tier 1 master.zip failed as well.", err2);
+        }
+      }
+
+      // TIER 2: If Tier 1 failed, fallback to REST API Zipball via CORS Proxies
+      if (!response || !response.ok) {
+        console.log("[LocalUploader] Tier 2: Falling back to REST API Zipball...");
+        try {
+          const apiZipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/main`;
+          response = await fetchWithFallbackProxies(apiZipUrl);
+          if (!response || !response.ok) throw new Error(`Status ${response?.status}`);
+        } catch (err3) {
+          console.warn("[LocalUploader] Tier 2 main zipball failed, trying master zipball...", err3);
+          try {
+            const fallbackApiZipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/master`;
+            response = await fetchWithFallbackProxies(fallbackApiZipUrl);
+            if (!response || !response.ok) throw new Error(`Status ${response?.status}`);
+          } catch (err4) {
+            console.error("[LocalUploader] Tier 2 master zipball failed as well.", err4);
+            throw new Error("All ZIP download tiers failed.");
+          }
+        }
+      }
+
+      setProgress({ text: "Unzipping archive in-memory...", value: 35 });
+      const buffer = await response.arrayBuffer();
+      const jszip = await JSZip.loadAsync(buffer);
+      
+      const promises: Promise<void>[] = [];
+      
+      jszip.forEach((path, entry) => {
+        if (
+          !entry.dir && 
+          path.match(/\.(js|ts|jsx|tsx|py|c|h|cpp|hpp|cc|cs|go|rs|rb|php|swift|kt|kts|dart)$/) && 
+          !isPathIgnored(path)
+        ) {
+          promises.push(
+            entry.async("text").then((content) => {
+              // Strip the GitHub zipball root folder segment (e.g. "owner-repo-commitHash/")
+              const cleanPath = path.substring(path.indexOf("/") + 1);
+              files.push({ path: cleanPath, content });
+            })
+          );
+        }
+      });
+      
+      if (promises.length === 0) {
+        throw new Error("No parseable code files found in the repository.");
       }
       
-      if (!res.ok) {
-        throw new Error("Could not fetch repo (make sure it's public).");
-      }
-      
-      const data = await res.json();
-      const filePaths = data.tree
-        .filter((t: any) => t.type === "blob")
-        .map((t: any) => t.path)
-        .filter((p: string) => p.match(/\.(js|ts|jsx|tsx|py|c|h|cpp|hpp|cc|cs|go|rs|rb|php|swift|kt|kts|dart)$/) && !isPathIgnored(p));
-        
-      setProgress({ text: `Downloading ${filePaths.length} files...`, value: 30 });
-      
-      const files: any[] = [];
-      // Batch loading to prevent excessive concurrency
-      for (let i = 0; i < filePaths.length; i += 10) {
-        setProgress({ text: `Downloading ${i}/${filePaths.length}...`, value: 30 + Math.floor((i/filePaths.length) * 20) });
-        const batch = filePaths.slice(i, i + 10);
-        await Promise.all(batch.map(async (p: string) => {
-           try {
-             // Fetch via raw.githubusercontent which supports CORS
-             let r = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/main/${p}`);
-             if (!r.ok) r = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/master/${p}`);
-             if (r.ok) files.push({ path: p, content: await r.text() });
-           } catch (e) { console.warn("Fetch failed", e); }
-         }));
-      }
+      setProgress({ text: `Extracting ${promises.length} files...`, value: 50 });
+      await Promise.all(promises);
       
       await processFiles(files);
-    } catch (err) {
-      console.error(err);
-      setIsParsing(false);
-      alert("Error: " + (err as Error).message);
+      
+    } catch (zipErr: any) {
+      console.warn("[ZIP Flow] Failed, falling back to CDN individual file downloads...", zipErr);
+      files = [];
+      
+      try {
+        const match = githubUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
+        if (!match) throw new Error("Invalid GitHub URL");
+        const [_, owner, repo] = match;
+        
+        setProgress({ text: "Fetching repository tree...", value: 10 });
+        const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/main?recursive=1`;
+        let res = await fetch(treeUrl);
+        
+        // Fallback for master branch
+        if (!res.ok) {
+           const masterUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/master?recursive=1`;
+           res = await fetch(masterUrl);
+        }
+        
+        if (!res.ok) {
+          throw new Error("Could not fetch repo (make sure it's public).");
+        }
+        
+        const data = await res.json();
+        const filePaths = data.tree
+          .filter((t: any) => t.type === "blob")
+          .map((t: any) => t.path)
+          .filter((p: string) => p.match(/\.(js|ts|jsx|tsx|py|c|h|cpp|hpp|cc|cs|go|rs|rb|php|swift|kt|kts|dart)$/) && !isPathIgnored(p));
+          
+        setProgress({ text: `Downloading ${filePaths.length} files...`, value: 30 });
+        
+        // Batch loading to prevent excessive concurrency
+        for (let i = 0; i < filePaths.length; i += 10) {
+          setProgress({ text: `Downloading ${i}/${filePaths.length}...`, value: 30 + Math.floor((i/filePaths.length) * 20) });
+          const batch = filePaths.slice(i, i + 10);
+          await Promise.all(batch.map(async (p: string) => {
+             try {
+               let r = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/main/${p}`);
+               if (!r.ok) r = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/master/${p}`);
+               if (r.ok) files.push({ path: p, content: await r.text() });
+             } catch (e) { console.warn("Fetch failed", e); }
+           }));
+        }
+        
+        await processFiles(files);
+      } catch (err: any) {
+        console.error(err);
+        setIsParsing(false);
+        alert("Error: " + err.message);
+      }
     }
   };
 
@@ -338,11 +451,11 @@ export default function LocalUploader({ onComplete }: { onComplete: (data: unkno
     <div className="flex flex-col p-6 w-full h-full min-h-[400px] border border-white/10 dark:border-white/20 rounded-[2rem] bg-black/40 backdrop-blur-xl shadow-2xl relative overflow-hidden">
       
       {/* Tab Selectors */}
-      <div className="grid grid-cols-2 sm:flex bg-white/5 p-1.5 rounded-2xl mb-6 relative z-10 w-full shadow-inner border border-white/5 gap-1 sm:gap-0">
-        <button onClick={() => setActiveTab('folder')} className={`py-2.5 text-xs sm:text-sm font-semibold rounded-xl transition-all duration-300 ${activeTab === 'folder' ? 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>Folder</button>
-        <button onClick={() => setActiveTab('zip')} className={`py-2.5 text-xs sm:text-sm font-semibold rounded-xl transition-all duration-300 ${activeTab === 'zip' ? 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>ZIP</button>
-        <button onClick={() => setActiveTab('cgc')} className={`py-2.5 text-xs sm:text-sm font-semibold rounded-xl transition-all duration-300 ${activeTab === 'cgc' ? 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>CGC Bundle</button>
-        <button onClick={() => setActiveTab('github')} className={`py-2.5 text-xs sm:text-sm font-semibold rounded-xl transition-all duration-300 ${activeTab === 'github' ? 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>GitHub</button>
+      <div className="grid grid-cols-2 sm:flex bg-white/5 p-1.5 rounded-2xl mb-6 relative z-10 w-full shadow-inner border border-white/5 gap-1.5 sm:gap-2">
+        <button onClick={() => setActiveTab('folder')} className={`w-full sm:flex-1 py-2.5 px-3 text-xs sm:text-sm font-semibold rounded-xl transition-all duration-300 ${activeTab === 'folder' ? 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>Folder</button>
+        <button onClick={() => setActiveTab('zip')} className={`w-full sm:flex-1 py-2.5 px-3 text-xs sm:text-sm font-semibold rounded-xl transition-all duration-300 ${activeTab === 'zip' ? 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>ZIP</button>
+        <button onClick={() => setActiveTab('cgc')} className={`w-full sm:flex-1 py-2.5 px-3 text-xs sm:text-sm font-semibold rounded-xl transition-all duration-300 ${activeTab === 'cgc' ? 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>CGC Bundle</button>
+        <button onClick={() => setActiveTab('github')} className={`w-full sm:flex-1 py-2.5 px-3 text-xs sm:text-sm font-semibold rounded-xl transition-all duration-300 ${activeTab === 'github' ? 'bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>GitHub</button>
       </div>
 
       {/* Indexer Mode Toggle Selector */}

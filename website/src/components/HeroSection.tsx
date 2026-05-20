@@ -60,7 +60,7 @@ const HeroSection = () => {
   };
 
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-x-hidden py-12 md:py-0">
+    <section className="relative min-h-screen flex flex-col md:flex-row md:items-center md:justify-center overflow-x-hidden pt-36 pb-12 md:py-0">
       <motion.div
         key="hero"
         exit={{ opacity: 0, scale: 0.95 }}
@@ -77,7 +77,7 @@ const HeroSection = () => {
         <div className="absolute inset-0 bg-gradient-to-b from-white/60 via-white/40 to-white/80 dark:from-background/90 dark:via-background/80 dark:to-background/90" />
 
         {/* Content (2-Column Grid) */}
-        <div className="relative z-10 w-full h-full max-w-7xl mx-auto px-6 pt-24 md:pt-32 pb-16 md:pb-20 flex flex-col justify-center">
+        <div className="relative z-10 w-full max-w-7xl mx-auto px-6 pt-32 lg:pt-32 pb-16 lg:pb-20 flex flex-col lg:justify-center lg:h-full">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-center">
             
             {/* LEFT COLUMN: Explore CTA instead of LocalUploader */}

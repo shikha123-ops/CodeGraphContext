@@ -72,6 +72,14 @@ const Explore = () => {
   const fetchWithFallbackProxies = async (url: string): Promise<Response> => {
     if (!url) throw new Error("URL is empty");
     
+    // Try direct fetch first (essential for localhost, relative URLs, or CORS-enabled endpoints)
+    try {
+      const res = await fetch(url);
+      if (res.ok) return res;
+    } catch (e) {
+      console.warn("Direct fetch failed, falling back to CORS proxies...", e);
+    }
+    
     // 1. Check raw githubusercontent.com to bypass proxy using jsDelivr CDN directly
     if (url.includes("raw.githubusercontent.com")) {
       const match = url.match(/raw\.githubusercontent\.com\/([^\/]+)\/([^\/]+)\/([^\/]+)\/(.+)$/);
@@ -132,7 +140,93 @@ const Explore = () => {
       let method2Success = false;
 
       try {
-        // --- METHOD 2: FAST CDN FLOW ---
+        // --- METHOD 1: ZIP ARCHIVE FLOW (PRIMARY & HIGHLY OPTIMIZED) ---
+        setProgressText("Downloading repository zip archive (highly optimized)...");
+        setProgressValue(10);
+        
+        let response = null;
+
+        // TIER 1: Standard Web Archive ZIP (Rate-Limit Free) via CORS Proxies
+        try {
+          console.log("[Explore] Tier 1: Fetching standard web ZIP archive via proxies...");
+          const zipUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`;
+          response = await fetchWithFallbackProxies(zipUrl);
+          if (!response || !response.ok) throw new Error(`Status ${response?.status}`);
+        } catch (err1) {
+          console.warn("[Explore] Tier 1 main.zip failed, trying master.zip...", err1);
+          try {
+            const fallbackZipUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/master.zip`;
+            response = await fetchWithFallbackProxies(fallbackZipUrl);
+            if (!response || !response.ok) throw new Error(`Status ${response?.status}`);
+          } catch (err2) {
+            console.warn("[Explore] Tier 1 master.zip failed as well.", err2);
+          }
+        }
+
+        // TIER 2: If Tier 1 failed, fallback to REST API Zipball (Direct / Proxied)
+        if (!response || !response.ok) {
+          console.log("[Explore] Tier 2: Falling back to REST API Zipball...");
+          try {
+            const apiZipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/main`;
+            response = await fetchWithFallbackProxies(apiZipUrl);
+            if (!response || !response.ok) throw new Error(`Status ${response?.status}`);
+          } catch (err3) {
+            console.warn("[Explore] Tier 2 main zipball failed, trying master zipball...", err3);
+            try {
+              const fallbackApiZipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/master`;
+              response = await fetchWithFallbackProxies(fallbackApiZipUrl);
+              if (!response || !response.ok) throw new Error(`Status ${response?.status}`);
+            } catch (err4) {
+              console.error("[Explore] Tier 2 master zipball failed as well.", err4);
+              throw new Error("All ZIP download tiers failed.");
+            }
+          }
+        }
+
+        setProgressText("Unzipping archive in-memory...");
+        setProgressValue(30);
+        const buffer = await response.arrayBuffer();
+        const jszip = await JSZip.loadAsync(buffer);
+        
+        const promises: Promise<void>[] = [];
+        
+        jszip.forEach((path, entry) => {
+          if (
+            !entry.dir && 
+            path.match(/\.(js|ts|jsx|tsx|py|c|h|cpp|hpp|cc|cs|go|rs|rb|php|swift|kt|kts|dart)$/) && 
+            !isPathIgnored(path)
+          ) {
+            promises.push(
+              entry.async("text").then((content) => {
+                // Strip the GitHub zipball root folder segment (e.g. "owner-repo-commitHash/")
+                const cleanPath = path.substring(path.indexOf("/") + 1);
+                files.push({ path: cleanPath, content });
+              })
+            );
+          }
+        });
+        
+        if (promises.length === 0) {
+          throw new Error("No parseable code files found in the repository.");
+        }
+        
+        setProgressText(`Extracting ${promises.length} files...`);
+        setProgressValue(45);
+        await Promise.all(promises);
+
+        for (const f of files) {
+          fileContents[f.path] = f.content;
+        }
+
+        method2Success = true;
+        console.log(`[ZIP Flow] Successfully downloaded and extracted ${files.length} files.`);
+        
+      } catch (zipErr: any) {
+        console.warn("[ZIP Flow] Failed, falling back to CDN individual file downloads...", zipErr);
+        files = [];
+        fileContents = {};
+
+        // --- METHOD 2: FALLBACK FAST CDN FLOW ---
         setProgressText("Fetching repository structure from GitHub...");
         setProgressValue(5);
         
@@ -209,66 +303,6 @@ const Explore = () => {
         
         if (files.length === 0) {
           throw new Error("Failed to download any code files from the CDN.");
-        }
-        
-        method2Success = true;
-        console.log(`[Method 2] Successfully downloaded ${files.length} files from CDN.`);
-        
-      } catch (method2Err: any) {
-        console.warn("[Method 2] Failed, falling back to ZIP archive flow...", method2Err);
-        files = [];
-        fileContents = {};
-        
-        // --- METHOD 1: FALLBACK ZIP FLOW ---
-        setProgressText("Falling back: downloading repository zip archive...");
-        setProgressValue(10);
-        
-        let response;
-        try {
-          const zipUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`;
-          response = await fetchWithFallbackProxies(zipUrl);
-        } catch (err) {
-          const fallbackZipUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/master.zip`;
-          response = await fetchWithFallbackProxies(fallbackZipUrl);
-        }
-        
-        if (!response.ok) {
-          throw new Error(`Failed to download repository archive (Status ${response.status})`);
-        }
-
-        setProgressText("Unzipping archive in-memory...");
-        setProgressValue(30);
-        const buffer = await response.arrayBuffer();
-        const jszip = await JSZip.loadAsync(buffer);
-        
-        const promises: Promise<void>[] = [];
-        
-        jszip.forEach((path, entry) => {
-          if (
-            !entry.dir && 
-            path.match(/\.(js|ts|jsx|tsx|py|c|h|cpp|hpp|cc|cs|go|rs|rb|php|swift|kt|kts|dart)$/) && 
-            !isPathIgnored(path)
-          ) {
-            
-            promises.push(
-              entry.async("text").then((content) => {
-                const cleanPath = path.substring(path.indexOf("/") + 1);
-                files.push({ path: cleanPath, content });
-              })
-            );
-          }
-        });
-        
-        if (promises.length === 0) {
-          throw new Error("No parseable code files found in the repository.");
-        }
-        
-        setProgressText(`Extracting ${promises.length} files...`);
-        setProgressValue(45);
-        await Promise.all(promises);
-
-        for (const f of files) {
-          fileContents[f.path] = f.content;
         }
       }
 

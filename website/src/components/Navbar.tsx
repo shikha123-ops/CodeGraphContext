@@ -1,6 +1,6 @@
-import React from "react";
+import React, { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Sparkles, ArrowLeft, Github } from "lucide-react";
+import { Sparkles, ArrowLeft, Github, Menu, X } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 
 function handleScroll(e: React.MouseEvent<HTMLAnchorElement>) {
@@ -18,6 +18,7 @@ function handleScroll(e: React.MouseEvent<HTMLAnchorElement>) {
 const Navbar: React.FC = () => {
   const location = useLocation();
   const isLandingPage = location.pathname === "/";
+  const [isOpen, setIsOpen] = useState(false);
 
   return (
     <nav className="fixed top-3 md:top-5 left-1/2 transform -translate-x-1/2 z-50 w-[94vw] max-w-6xl select-none">
@@ -30,17 +31,14 @@ const Navbar: React.FC = () => {
         }}
       >
         {/* Left: Brand Logo & Title */}
-        <Link to="/" className="flex items-center gap-2 mr-3 shrink-0 group">
+        <Link to="/" className="flex items-center gap-1.5 md:gap-2 mr-3 shrink-0 group">
           <img
             src="/cgcIcon.png"
-            className="w-8 h-8 drop-shadow-[0_0_8px_rgba(168,85,247,0.6)] group-hover:scale-105 transition-transform duration-300"
+            className="w-7 h-7 md:w-8 md:h-8 drop-shadow-[0_0_8px_rgba(168,85,247,0.6)] group-hover:scale-105 transition-transform duration-300"
             alt="CodeGraphContext Logo"
           />
-          <span className="font-extrabold text-base md:text-lg bg-gradient-primary bg-clip-text text-transparent tracking-tight hidden sm:inline-block">
+          <span className="font-extrabold text-[13px] sm:text-base md:text-lg bg-gradient-primary bg-clip-text text-transparent tracking-tight block">
             CodeGraphContext
-          </span>
-          <span className="font-extrabold text-base bg-gradient-primary bg-clip-text text-transparent tracking-tight sm:hidden">
-            CGC
           </span>
         </Link>
 
@@ -105,7 +103,7 @@ const Navbar: React.FC = () => {
         ) : null}
 
         {/* Right: Actions */}
-        <div className="flex items-center gap-1.5 md:gap-3 shrink-0">
+        <div className="flex items-center gap-1 md:gap-3 shrink-0">
           <ThemeToggle />
           {isLandingPage ? (
             <>
@@ -133,8 +131,48 @@ const Navbar: React.FC = () => {
               </button>
             </Link>
           )}
+
+          {/* Hamburger Menu Icon (Mobile Only) */}
+          {isLandingPage && (
+            <button
+              onClick={() => setIsOpen(!isOpen)}
+              className="lg:hidden p-2 rounded-full hover:bg-white/5 text-muted-foreground hover:text-white transition-colors duration-200 shrink-0"
+              title="More Options"
+            >
+              {isOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Mobile Menu Dropdown Panel */}
+      {isOpen && isLandingPage && (
+        <div className="lg:hidden mt-2 w-full rounded-3xl border border-white/10 bg-black/85 backdrop-blur-2xl p-4 shadow-2xl flex flex-col gap-1.5 animate-in slide-in-from-top-3 duration-300">
+          <ul className="flex flex-col gap-1.5 text-sm font-semibold text-gray-300">
+            {[
+              { label: "Features", href: "#features" },
+              { label: "Pre-indexed Bundles", href: "#bundle-registry" },
+              { label: "CGC Bundle Generator", href: "#bundle-generator" },
+              { label: "Cookbook / Guides", href: "#cookbook" },
+              { label: "Interactive Demo", href: "#demo" },
+              { label: "Get Started / Install", href: "#installation" },
+            ].map((link) => (
+              <li key={link.label}>
+                <a
+                  href={link.href}
+                  className="block px-4 py-3 rounded-2xl hover:bg-white/5 hover:text-white transition-all duration-200"
+                  onClick={(e) => {
+                    setIsOpen(false);
+                    handleScroll(e);
+                  }}
+                >
+                  {link.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </nav>
   );
 };

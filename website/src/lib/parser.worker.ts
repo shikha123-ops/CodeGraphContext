@@ -2,6 +2,14 @@ import { Parser, Language, Query } from "web-tree-sitter";
 // Leverage Vite's asset pipeline to guarantee we receive the exact .wasm file that matches our NPM package version
 import treeSitterWasmUrl from "web-tree-sitter/tree-sitter.wasm?url";
 
+const IGNORED_DIRS = new Set([
+  'node_modules', '.git', '.github', 'dist', 'build', 'out', 'coverage',
+  '.next', '.nuxt', '__pycache__', 'venv', '.venv', 'env', '.env', '.tox',
+  'eggs', 'target', '.gradle', '.idea', 'cmake-build-debug', 'bin', 'obj',
+  'packages', 'vendor', 'Pods', '.build', 'DerivedData', '.dart_tool',
+  '.vscode'
+]);
+
 let parser: any = null;
 let initPromise: Promise<void> | null = null;
 const wasmLanguageCache = new Map<string, any>();
@@ -58,7 +66,19 @@ async function getLanguageForFile(path: string) {
   }
 
   if (wasmLanguageCache.has(wasmName)) {
-    return wasmLanguageCache.get(wasmName);
+    const lang = wasmLanguageCache.get(wasmName);
+    wasmLanguageCache.delete(wasmName);
+    wasmLanguageCache.set(wasmName, lang);
+    return lang;
+  }
+
+  const CACHE_LIMIT = 3;
+  if (wasmLanguageCache.size >= CACHE_LIMIT) {
+    const oldestKey = wasmLanguageCache.keys().next().value;
+    if (oldestKey) {
+      wasmLanguageCache.delete(oldestKey);
+      console.log(`[Worker LRU Cache] Evicted parser to free WASM heap: ${oldestKey}`);
+    }
   }
 
   try {
@@ -640,6 +660,14 @@ self.onmessage = async (e) => {
       // nodes only represent repo-relative segments (e.g. "src", "lib").
       repoRootPrefix = computeCommonPrefix(pendingFileQueue.map(f => f.path));
       repoId = addNode("Repository", "Repository", "root", 15);
+      
+      // Sort the queue by language extension so files of the same language are parsed contiguously in batches
+      pendingFileQueue.sort((a, b) => {
+        const extA = a.path.match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toLowerCase() || '';
+        const extB = b.path.match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toLowerCase() || '';
+        return extA.localeCompare(extB);
+      });
+
       processNextBatch();
     } catch (err: any) {
       self.postMessage({ type: 'ERROR', payload: err.message });
@@ -715,13 +743,13 @@ async function processNextBatch() {
   }
 
   // Smaller batch = less peak memory per tick; GC gets more breathing room
-  const batch = pendingFileQueue.splice(0, 10);
+  const batch = pendingFileQueue.splice(0, 80);
 
   for (let i = 0; i < batch.length; i++) {
     const f = batch[i];
     processedCount++;
 
-    if (processedCount % 5 === 0) {
+    if (processedCount % 25 === 0) {
       const pm = (performance as any).memory;
       const memStr = pm ? ` [RAM: ${(pm.usedJSHeapSize / 1048576).toFixed(1)}MB]` : "";
       self.postMessage({
@@ -733,13 +761,6 @@ async function processNextBatch() {
       });
     }
 
-    const IGNORED_DIRS = new Set([
-      'node_modules', '.git', '.github', 'dist', 'build', 'out', 'coverage',
-      '.next', '.nuxt', '__pycache__', 'venv', '.venv', 'env', '.env', '.tox',
-      'eggs', 'target', '.gradle', '.idea', 'cmake-build-debug', 'bin', 'obj',
-      'packages', 'vendor', 'Pods', '.build', 'DerivedData', '.dart_tool',
-      '.vscode'
-    ]);
     const isPathIgnored = f.path.split(/[\/\\]/).some(part => IGNORED_DIRS.has(part));
 
     // Skip large files and cache directories; tighter limit now we parse more languages

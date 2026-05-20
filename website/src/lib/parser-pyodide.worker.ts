@@ -44,7 +44,20 @@ async function getLanguageForWasmName(wasmName: string) {
   if (!wasmName) return null;
 
   if (wasmLanguageCache.has(wasmName)) {
-    return wasmLanguageCache.get(wasmName);
+    const lang = wasmLanguageCache.get(wasmName);
+    wasmLanguageCache.delete(wasmName);
+    wasmLanguageCache.set(wasmName, lang);
+    return lang;
+  }
+
+  const CACHE_LIMIT = 3;
+  if (wasmLanguageCache.size >= CACHE_LIMIT) {
+    const oldestKey = wasmLanguageCache.keys().next().value;
+    if (oldestKey) {
+      wasmLanguageCache.delete(oldestKey);
+      compiledQueryCache.delete(oldestKey);
+      console.log(`[Pyodide Worker LRU Cache] Evicted parser to free WASM heap: ${oldestKey}`);
+    }
   }
 
   try {
@@ -92,6 +105,26 @@ async function getLanguageForFile(path: string) {
   }
 
   return getLanguageForWasmName(wasmName);
+}
+
+// Per-language query cache (compiled Query objects are reusable)
+const compiledQueryCache = new Map<string, Record<string, Query | null>>();
+
+function getCompiledQueries(lang: any, queryKey: string, wasmName: string): Record<string, Query | null> {
+  if (compiledQueryCache.has(wasmName)) return compiledQueryCache.get(wasmName)!;
+  const spec = QUERIES[queryKey];
+  const compiled: Record<string, Query | null> = {};
+  for (const [k, src] of Object.entries(spec)) {
+    if (!src.trim()) { compiled[k] = null; continue; }
+    try {
+      compiled[k] = new Query(lang, src);
+    } catch (e) {
+      console.warn(`[parser-pyodide.worker] Query compile error [${queryKey}:${k}]:`, e);
+      compiled[k] = null;
+    }
+  }
+  compiledQueryCache.set(wasmName, compiled);
+  return compiled;
 }
 
 // Custom language parser query strings
@@ -458,8 +491,8 @@ self.onmessage = async (e: MessageEvent) => {
 
       await initParser();
 
-      // Identify unique languages/WASMs needed by the queued files
-      const uniqueWasmNames = new Set<string>();
+      // Count unique languages in queue to find prominent ones
+      const counts = new Map<string, number>();
       for (const f of pendingFileQueue) {
         const extMatch = f.path.match(/\.([a-zA-Z0-9]+)$/);
         if (extMatch) {
@@ -490,13 +523,27 @@ self.onmessage = async (e: MessageEvent) => {
             case 'pm': wasmName = 'tree-sitter-perl.wasm'; break;
           }
           if (wasmName) {
-            uniqueWasmNames.add(wasmName);
+            counts.set(wasmName, (counts.get(wasmName) || 0) + 1);
           }
         }
       }
 
+      // Sort the queue by language extension so files of the same language are parsed contiguously in batches
+      pendingFileQueue.sort((a, b) => {
+        const extA = a.path.match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toLowerCase() || '';
+        const extB = b.path.match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toLowerCase() || '';
+        return extA.localeCompare(extB);
+      });
+
+      // Pre-load ONLY the top 3 prominent languages to prevent initial memory crash
+      const uniqueWasmNames = new Set<string>();
+      const sorted = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+      for (let i = 0; i < Math.min(3, sorted.length); i++) {
+        uniqueWasmNames.add(sorted[i][0]);
+      }
+
       if (uniqueWasmNames.size > 0) {
-        self.postMessage({ type: 'PROGRESS', payload: { msg: `Downloading language parsers in parallel...`, percent: 12 } });
+        self.postMessage({ type: 'PROGRESS', payload: { msg: `Downloading primary language parsers...`, percent: 12 } });
         await Promise.all(Array.from(uniqueWasmNames).map(name => getLanguageForWasmName(name)));
       }
 
@@ -515,10 +562,10 @@ async function processNextBatch() {
     return;
   }
 
-  const batch = pendingFileQueue.splice(0, 15);
+  const batch = pendingFileQueue.splice(0, 80);
   for (const f of batch) {
     processedCount++;
-    if (processedCount % 5 === 0) {
+    if (processedCount % 25 === 0) {
       self.postMessage({
         type: 'PROGRESS',
         payload: {
@@ -547,10 +594,38 @@ async function processNextBatch() {
       const lang = await getLanguageForFile(f.path);
       if (!lang) continue;
 
+      const ext = f.path.match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toLowerCase() || '';
+      let wasmName = '';
+      switch (ext) {
+        case 'py': wasmName = 'tree-sitter-python.wasm'; break;
+        case 'js':
+        case 'jsx': wasmName = 'tree-sitter-javascript.wasm'; break;
+        case 'ts':
+        case 'tsx': wasmName = 'tree-sitter-tsx.wasm'; break;
+        case 'java': wasmName = 'tree-sitter-java.wasm'; break;
+        case 'c':
+        case 'h': wasmName = 'tree-sitter-c.wasm'; break;
+        case 'cpp':
+        case 'hpp':
+        case 'cc': wasmName = 'tree-sitter-cpp.wasm'; break;
+        case 'cs': wasmName = 'tree-sitter-c_sharp.wasm'; break;
+        case 'go': wasmName = 'tree-sitter-go.wasm'; break;
+        case 'rs': wasmName = 'tree-sitter-rust.wasm'; break;
+        case 'rb': wasmName = 'tree-sitter-ruby.wasm'; break;
+        case 'php': wasmName = 'tree-sitter-php.wasm'; break;
+        case 'swift': wasmName = 'tree-sitter-swift.wasm'; break;
+        case 'kt':
+        case 'kts': wasmName = 'tree-sitter-kotlin.wasm'; break;
+        case 'dart': wasmName = 'tree-sitter-dart.wasm'; break;
+        case 'pl':
+        case 'pm': wasmName = 'tree-sitter-perl.wasm'; break;
+      }
+
+      const queries = getCompiledQueries(lang, queryKey, wasmName);
+
       parser!.setLanguage(lang);
       const tree = parser!.parse(f.content);
       const root = tree.rootNode;
-      const q = QUERIES[queryKey];
       
       const fileData: any = {
         path: f.path,
@@ -563,9 +638,8 @@ async function processNextBatch() {
       };
 
       // 1. Definitions
-      if (q.definitions) {
-        const query = new Query(lang, q.definitions);
-        const captures = query.captures(root);
+      if (queries.definitions) {
+        const captures = queries.definitions.captures(root);
         const nodeToMeta = new Map<number, any>();
         
         for (const cap of captures) {
@@ -616,9 +690,8 @@ async function processNextBatch() {
       }
 
       // 2. Imports
-      if (q.imports) {
-        const query = new Query(lang, q.imports);
-        const captures = query.captures(root);
+      if (queries.imports) {
+        const captures = queries.imports.captures(root);
         for (const cap of captures) {
           if (cap.name === 'import.module') {
             fileData.imports.push({
@@ -630,9 +703,8 @@ async function processNextBatch() {
       }
 
       // 3. Calls
-      if (q.calls) {
-        const query = new Query(lang, q.calls);
-        const captures = query.captures(root);
+      if (queries.calls) {
+        const captures = queries.calls.captures(root);
         for (const cap of captures) {
           if (cap.name === 'call.name') {
             fileData.calls.push({
@@ -644,9 +716,8 @@ async function processNextBatch() {
       }
 
       // 4. Inherits
-      if (q.inherits) {
-        const query = new Query(lang, q.inherits);
-        const captures = query.captures(root);
+      if (queries.inherits) {
+        const captures = queries.inherits.captures(root);
         for (const cap of captures) {
           if (cap.name === 'inherit.base') {
             fileData.inherits.push(cap.node.text);
@@ -655,9 +726,8 @@ async function processNextBatch() {
       }
 
       // 5. Variables
-      if (indexOptions.indexVariables && q.variables) {
-        const query = new Query(lang, q.variables);
-        const captures = query.captures(root);
+      if (indexOptions.indexVariables && queries.variables) {
+        const captures = queries.variables.captures(root);
         for (const cap of captures) {
           if (cap.name === 'var.name') {
             fileData.variables.push({
