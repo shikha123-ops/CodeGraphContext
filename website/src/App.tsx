@@ -8,6 +8,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 import Explore from "./pages/Explore";
+import Privacy from "./pages/Privacy";
 import MoveToTop from "./components/MoveToTop";
 import Navbar from "./components/Navbar";
 
@@ -44,6 +45,7 @@ const App: React.FC = () => {
             <Routes>
               <Route path="/" element={<Index />} />
               <Route path="/explore" element={<Explore />} />
+              <Route path="/privacy" element={<Privacy />} />
               <Route path="/github/:owner/:repo" element={<Explore />} />
               <Route path="/:owner/:repo" element={<Explore />} />
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
