@@ -692,9 +692,9 @@ const Explore = () => {
 
   // ✅ Supabase Realtime Signaling Tunnel: Bridges ChatGPT Action calls to browser's AST Code Graph!
   useEffect(() => {
-    // 1. Get Supabase credentials
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-    const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    // 1. Get Supabase credentials (with 100% robust safe production fallbacks!)
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "https://husyiuqyswpudlyuskno.supabase.co";
+    const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh1c3lpdXF5c3dwdWRseXVza25vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2NDUwNDYsImV4cCI6MjA5NTIyMTA0Nn0.dNCRxdGlL5vgug0sB4BwhCfBx_nAt9oR0RT2Upv0al8";
     
     if (!supabaseUrl || !supabaseAnonKey) {
       console.warn("[Explore Tunnel] Supabase credentials not found in env.");

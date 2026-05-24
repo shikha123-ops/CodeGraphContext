@@ -136,6 +136,29 @@ export class KuzuCoordinator {
           }
         }
       )
+      .on(
+        "broadcast",
+        { event: "tool-call-request" },
+        async ({ payload }: { payload: any }) => {
+          const { id, toolName, args } = payload || {};
+          if (!id || !toolName) return;
+          console.log(`[KuzuCoordinator] 📥 Global MCP Tool Call request received: id=${id}, name=${toolName}`);
+          try {
+            const result = await this.executeToolCallback(toolName, args);
+            await this.globalChannel.send({
+              type: "broadcast",
+              event: "tool-call-response",
+              payload: { id, status: "success", result }
+            });
+          } catch (err: any) {
+            await this.globalChannel.send({
+              type: "broadcast",
+              event: "tool-call-response",
+              payload: { id, status: "error", error: err.message }
+            });
+          }
+        }
+      )
       .subscribe((status: string) => {
         if (status === "SUBSCRIBED") {
           this.isSubscribed = true;
