@@ -54,32 +54,6 @@ const BundleRegistrySection = () => {
                 console.warn('Local Vercel api/bundles endpoint unavailable, attempting direct fetch:', apiErr);
             }
 
-            // In development, try to fetch live weekly bundles directly from GitHub Releases to show all 33 repos
-            if (import.meta.env.DEV) {
-                try {
-                    const ghResponse = await fetch(
-                        'https://api.github.com/repos/CodeGraphContext/CodeGraphContext/releases',
-                        { headers: { 'Accept': 'application/vnd.github.v3+json' } }
-                    );
-                    if (ghResponse.ok) {
-                        const releases = await ghResponse.json();
-                        const weeklyReleases = releases.filter((r: any) =>
-                            r.tag_name.startsWith('bundles-') && r.tag_name !== 'bundles-latest'
-                        );
-                        if (weeklyReleases.length > 0) {
-                            const parsed = parseWeeklyBundles(weeklyReleases[0]);
-                            if (parsed && parsed.length > 0) {
-                                setBundles(parsed);
-                                setLoading(false);
-                                return;
-                            }
-                        }
-                    }
-                } catch (ghErr) {
-                    console.error('Failed to fetch direct GitHub releases in DEV mode:', ghErr);
-                }
-            }
-
             // Fallback to local mock bundles if offline or rate-limited
             setBundles(getMockBundles());
         } catch (error) {
@@ -158,79 +132,7 @@ const BundleRegistrySection = () => {
         }
     ];
 
-    const parseWeeklyBundles = (release: any): Bundle[] => {
-        // Parse bundle files from release assets
-        return release.assets
-            .filter((asset: any) => asset.name.endsWith('.cgc') || asset.name.endsWith('.cgc.base64'))
-            .map((asset: any) => {
-                const rawName = asset.name.replace('.cgc.base64', '').replace('.cgc', '');
-                
-                let owner = 'unknown';
-                let repoName = 'unknown';
-                let branchName = 'main';
-                let commitSha = 'unknown';
-                let displayName = 'unknown';
-                
-                if (rawName.includes('__')) {
-                    // Standardized format: {owner}__{repo}__{branch}__{commit}
-                    // Legacy format: cgc__{owner}__{repo}__{branch}__{commit}
-                    const parts = rawName.split('__');
-                    if (parts[0] === 'cgc' && parts.length >= 5) {
-                        owner = parts[1];
-                        repoName = parts[2];
-                        branchName = parts[3];
-                        commitSha = parts[4];
-                        displayName = repoName;
-                    } else if (parts.length >= 4) {
-                        owner = parts[0];
-                        repoName = parts[1];
-                        branchName = parts[2];
-                        commitSha = parts[3];
-                        displayName = repoName;
-                    } else {
-                        repoName = rawName;
-                        displayName = rawName;
-                        owner = 'local';
-                    }
-                } else if (rawName.includes('-')) {
-                    // Legacy format: {repo}-{branch}-{commit} or {name}-{version}
-                    const parts = rawName.split('-');
-                    if (parts.length >= 3) {
-                        repoName = parts.slice(0, parts.length - 2).join('-');
-                        branchName = parts[parts.length - 2];
-                        commitSha = parts[parts.length - 1];
-                        owner = repoName;
-                        displayName = repoName;
-                    } else if (parts.length === 2) {
-                        repoName = parts[0];
-                        commitSha = parts[1];
-                        owner = repoName;
-                        displayName = repoName;
-                    }
-                } else {
-                    repoName = rawName;
-                    displayName = rawName;
-                    owner = rawName;
-                }
-                
-                // Format display/commit
-                const cleanCommit = commitSha.length === 40 && /^[0-9a-fA-F]+$/.test(commitSha) ? commitSha.substring(0, 7) : commitSha;
-                const repoPath = owner !== 'unknown' ? `${owner}/${repoName}` : repoName;
-                
-                return {
-                    name: displayName,
-                    repo: repoPath,
-                    bundle_name: asset.name,
-                    version: cleanCommit || 'latest',
-                    commit: commitSha,
-                    size: `${(asset.size / 1024 / 1024).toFixed(1)}MB`,
-                    download_url: asset.browser_download_url,
-                    generated_at: asset.updated_at,
-                    category: 'Pre-indexed',
-                    source: 'trending'
-                };
-            });
-    };
+
 
     const categories = [
         { id: 'all', label: 'All' },
@@ -337,7 +239,7 @@ const BundleRegistrySection = () => {
                     <Alert className="mb-6 border-blue-500 bg-blue-50 dark:bg-blue-950/20">
                         <AlertDescription className="text-blue-800 dark:text-blue-200">
                             <strong>Development Mode:</strong> Showing mock bundle data.
-                            Deploy to production to see real bundles from GitHub Releases.
+                            Deploy to production to see real bundles from the Hugging Face registry.
                         </AlertDescription>
                     </Alert>
                 )}
