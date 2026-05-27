@@ -724,8 +724,8 @@ const Explore = () => {
             repo: `${owner}/${repo}`,
             version: latestCommitSha ? (latestCommitSha.length === 40 && /^[0-9a-fA-F]+$/.test(latestCommitSha) ? latestCommitSha.substring(0, 7) : latestCommitSha) : "1.0.0",
             commit: latestCommitSha || "",
-            timestamp: new Date().toISOString(),
-            generator: "CodeGraphContext-Web-WASM"
+            exported_at: new Date().toISOString(),
+            generator: "WASMv0.0.1"
           }
         };
         setGraphData(finalGraphData);
