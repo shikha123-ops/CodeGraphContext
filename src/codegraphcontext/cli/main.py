@@ -41,6 +41,7 @@ from .cli_helpers import (
     watch_helper,
     unwatch_helper,
     list_watching_helper,
+    setup_scip_helper,
 )
 
 # Set the log level for the noisy neo4j, asyncio, and urllib3 loggers to keep the output clean.
@@ -77,7 +78,7 @@ from .visualizer import (
 # Initialize the Typer app and Rich console for formatted output.
 app = typer.Typer(
     name="cgc",
-    help="CodeGraphContext: An MCP server for AI-powered code analysis.\n\n[DEPRECATED] 'cgc start' is deprecated. Use 'cgc mcp start' instead.",
+    help="CodeGraphContext: An MCP server for AI-powered code analysis.",
     add_completion=True,
 )
 console = Console(stderr=True)
@@ -284,7 +285,7 @@ def context_default(
 # CREDENTIALS LOADING PRECEDENCE
 # ============================================================================
 
-def _load_credentials():
+def _load_credentials(cli_context_flag: Optional[str] = None):
     """
     Loads configuration and credentials from various sources into environment variables.
     Uses per-variable precedence - each variable is loaded from the highest priority source.
@@ -304,6 +305,7 @@ def _load_credentials():
     from codegraphcontext.cli.config_manager import (
         ensure_config_dir,
         codegraphcontext_dotenv_at_cwd,
+        normalize_config_path,
     )
     
     # Ensure config directory exists (lazy initialization)
@@ -334,9 +336,17 @@ def _load_credentials():
     mcp_file_path = Path.cwd() / "mcp.json"
     if mcp_file_path.exists():
         try:
-            with open(mcp_file_path, "r") as f:
+            with open(mcp_file_path, "r", encoding="utf-8", errors="replace") as f:
                 mcp_config = json.load(f)
             server_env = mcp_config.get("mcpServers", {}).get("CodeGraphContext", {}).get("env", {})
+            if isinstance(server_env, dict):
+                normalized_env = {}
+                for env_key, env_value in server_env.items():
+                    if env_value is not None and "PATH" in env_key:
+                        normalized_env[env_key] = normalize_config_path(str(env_value), absolute=True)
+                    else:
+                        normalized_env[env_key] = env_value
+                server_env = normalized_env
             _append_source("mcp.json", server_env)
         except Exception as e:
             console.print(f"[yellow]Warning: Could not load mcp.json: {e}[/yellow]")
@@ -345,7 +355,8 @@ def _load_credentials():
     global_env_path = Path.home() / ".codegraphcontext" / ".env"
     if global_env_path.exists():
         try:
-            _append_source(str(global_env_path), dotenv_values(str(global_env_path)))
+            with open(global_env_path, "r", encoding="utf-8", errors="replace") as f:
+                _append_source(str(global_env_path), dotenv_values(stream=f))
         except Exception as e:
             console.print(f"[yellow]Warning: Could not load global .env: {e}[/yellow]")
     
@@ -353,7 +364,8 @@ def _load_credentials():
     try:
         dotenv_path = find_dotenv(usecwd=True, raise_error_if_not_found=False)
         if dotenv_path:
-            _append_source(str(dotenv_path), dotenv_values(dotenv_path))
+            with open(dotenv_path, "r", encoding="utf-8", errors="replace") as f:
+                _append_source(str(dotenv_path), dotenv_values(stream=f))
     except Exception as e:
         console.print(f"[yellow]Warning: Could not load .env from current directory: {e}[/yellow]")
 
@@ -361,8 +373,9 @@ def _load_credentials():
     try:
         local_cgc_env = codegraphcontext_dotenv_at_cwd(Path.cwd())
         if local_cgc_env and local_cgc_env.resolve() != global_env_path.resolve():
-            config_sources.append(dotenv_values(str(local_cgc_env)))
-            config_source_names.append(str(local_cgc_env))
+            with open(local_cgc_env, "r", encoding="utf-8", errors="replace") as f:
+                vals = dotenv_values(stream=f)
+                _append_source(str(local_cgc_env), vals)
     except Exception as e:
         console.print(
             f"[yellow]Warning: Could not load .codegraphcontext/.env at cwd: {e}[/yellow]"
@@ -383,6 +396,8 @@ def _load_credentials():
         if value is not None:  # Only set non-None values
             if key in runtime_env:
                 continue
+            if "PATH" in key:
+                value = normalize_config_path(str(value), absolute=True)
             os.environ[key] = str(value)
     
     # Report what was loaded
@@ -406,31 +421,62 @@ def _load_credentials():
         )
     
     
-    # Show which database is actually being used.
-    # When CGC_RUNTIME_DB_TYPE or DEFAULT_DATABASE is set, trust it. Otherwise
-    # call get_database_manager() so the banner matches factory fallbacks.
+    # Detect the context to see if it specifies a custom database
+    if cli_context_flag is None:
+        import sys
+        for i, arg in enumerate(sys.argv):
+            if arg in ("--context", "-c"):
+                if i + 1 < len(sys.argv):
+                    cli_context_flag = sys.argv[i + 1]
+                    break
+            elif arg.startswith("--context="):
+                cli_context_flag = arg.split("=", 1)[1]
+                break
+
+    from codegraphcontext.cli.config_manager import resolve_context
+    ctx = None
+    try:
+        ctx = resolve_context(cli_context_flag)
+    except Exception:
+        pass
+
+    # Determine if there is a runtime database override.
     runtime_db = os.environ.get("CGC_RUNTIME_DB_TYPE")
-    database_type = os.environ.get("DATABASE_TYPE")
-    default_database = os.environ.get("DEFAULT_DATABASE")
+    has_runtime_override = (
+        runtime_db is not None
+        or "DATABASE_TYPE" in runtime_env
+        or "DEFAULT_DATABASE" in runtime_env
+    )
 
-    explicit_db = runtime_db or database_type or default_database
+    # If there is no runtime override, but the context defines a database,
+    # set DEFAULT_DATABASE to the context database to ensure that's what gets initialized.
+    if not has_runtime_override and ctx and ctx.mode != "global" and ctx.database:
+        os.environ["DEFAULT_DATABASE"] = ctx.database
 
+    # Now select the database based on precedence:
+    # 1. CGC_RUNTIME_DB_TYPE
+    # 2. DATABASE_TYPE or DEFAULT_DATABASE from runtime environment (shell variables)
+    # 3. Context database
+    # 4. DATABASE_TYPE or DEFAULT_DATABASE from merged config files (.env files)
+    # 5. Auto-detect fallback
     if runtime_db:
+        default_db = runtime_db.lower()
         db_source = "runtime-env (CGC_RUNTIME_DB_TYPE)"
     elif "DATABASE_TYPE" in runtime_env:
+        default_db = runtime_env["DATABASE_TYPE"].lower()
         db_source = "environment (DATABASE_TYPE)"
     elif "DEFAULT_DATABASE" in runtime_env:
+        default_db = runtime_env["DEFAULT_DATABASE"].lower()
         db_source = "environment (DEFAULT_DATABASE)"
-    elif database_type and "DATABASE_TYPE" in key_source_map:
+    elif not has_runtime_override and ctx and ctx.mode != "global" and ctx.database:
+        default_db = ctx.database.lower()
+        db_source = f"context ({ctx.context_name or 'resolved'})"
+    elif os.environ.get("DATABASE_TYPE") and "DATABASE_TYPE" in key_source_map:
+        default_db = os.environ["DATABASE_TYPE"].lower()
         db_source = key_source_map["DATABASE_TYPE"]
-    elif default_database and "DEFAULT_DATABASE" in key_source_map:
+    elif os.environ.get("DEFAULT_DATABASE") and "DEFAULT_DATABASE" in key_source_map:
+        default_db = os.environ["DEFAULT_DATABASE"].lower()
         db_source = key_source_map["DEFAULT_DATABASE"]
-    else:
-        db_source = "auto-detect"
-    explicit_db = runtime_db or os.environ.get("DEFAULT_DATABASE")
-
-    if explicit_db:
-        default_db = explicit_db.lower()
     else:
         # No explicit choice — ask the factory which backend it will use
         try:
@@ -443,6 +489,7 @@ def _load_credentials():
             default_db = "falkordb" if _is_falkordb_available() else "kuzudb"
         db_source = "auto-detect"
 
+    # Print selection banner
     if default_db == "neo4j":
         has_neo4j_creds = all([
             os.environ.get("NEO4J_URI"),
@@ -461,20 +508,14 @@ def _load_credentials():
         console.print(f"[cyan]Using database: falkordb (source: {db_source})[/cyan]")
     elif default_db == "kuzudb":
         console.print(f"[cyan]Using database: kuzudb (source: {db_source})[/cyan]")
+    elif default_db == "ladybugdb":
+        console.print(f"[cyan]Using database: ladybugdb (source: {db_source})[/cyan]")
     elif default_db == "falkordb-remote":
         host = os.environ.get("FALKORDB_HOST")
         if host:
             console.print(f"[cyan]Using database: falkordb-remote (source: {db_source}, host: {host})[/cyan]")
         else:
             console.print("[yellow]⚠ DATABASE_TYPE=falkordb-remote but FALKORDB_HOST not set.[/yellow]")
-    elif default_db == "falkordb":
-        if os.environ.get("FALKORDB_HOST"):
-            console.print(f"[cyan]Using database: falkordb-remote (source: {db_source}, host: {os.environ.get('FALKORDB_HOST')})[/cyan]")
-        else:
-            console.print(f"[cyan]Using database: falkordb (source: {db_source})[/cyan]")
-            console.print(
-                "[yellow]⚠ DEFAULT_DATABASE=falkordb-remote but FALKORDB_HOST not set.[/yellow]"
-            )
     else:
         console.print(f"[cyan]Using database: {default_db} (source: {db_source})[/cyan]")
 
@@ -531,7 +572,7 @@ def config_reset():
         console.print("[yellow]Reset cancelled[/yellow]")
 
 @config_app.command("db")
-def config_db(backend: str = typer.Argument(..., help="Database backend: 'neo4j', 'falkordb', 'falkordb-remote', or 'kuzudb'")):
+def config_db(backend: str = typer.Argument(..., help="Database backend: 'neo4j', 'falkordb', 'falkordb-remote', 'kuzudb', or 'ladybugdb'")):
     """
     Quickly switch the default database backend.
     
@@ -543,9 +584,9 @@ def config_db(backend: str = typer.Argument(..., help="Database backend: 'neo4j'
         cgc config db kuzudb
     """
     backend = backend.lower()
-    if backend not in ['falkordb', 'falkordb-remote', 'neo4j', 'kuzudb']:
+    if backend not in ['falkordb', 'falkordb-remote', 'neo4j', 'kuzudb', 'ladybugdb']:
         console.print(f"[bold red]Invalid backend: {backend}[/bold red]")
-        console.print("Must be 'falkordb', 'falkordb-remote', 'neo4j', or 'kuzudb'")
+        console.print("Must be 'falkordb', 'falkordb-remote', 'neo4j', 'kuzudb', or 'ladybugdb'")
         raise typer.Exit(code=1)
     
     updated = config_manager.set_config_value("DEFAULT_DATABASE", backend)
@@ -753,8 +794,41 @@ def load_shortcut(
 # REGISTRY COMMAND GROUP - Browse and Download Bundles
 # ============================================================================
 
-registry_app = typer.Typer(help="Browse and download bundles from the registry")
+registry_app = typer.Typer(
+    help="Browse and download bundles from the registry",
+    invoke_without_command=True,
+)
 app.add_typer(registry_app, name="registry")
+
+
+# Create API command group
+api_app = typer.Typer(help="CGC Gateway (HTTP API) commands")
+app.add_typer(api_app, name="api")
+
+@api_app.command("start")
+def api_start(
+    host: str = typer.Option("0.0.0.0", help="Host to bind the server to"),
+    port: int = typer.Option(8000, help="Port to bind the server to"),
+    reload: bool = typer.Option(False, help="Enable auto-reload (development only)"),
+):
+    """
+    Start the CGC Gateway HTTP API server.
+    
+    This server provides a REST API that can be used by ChatGPT Actions,
+    Claude, or web frontends to interact with the CodeGraphContext graph.
+    """
+    import uvicorn
+    console.print(f"[bold green]Starting CGC Gateway on {host}:{port}...[/bold green]")
+    _load_credentials()
+    uvicorn.run("codegraphcontext.api.app:app", host=host, port=port, reload=reload)
+
+
+
+@registry_app.callback()
+def registry_callback(ctx: typer.Context):
+    """Browse and download bundles from the registry."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
 
 @registry_app.command("list")
 def registry_list(
@@ -940,11 +1014,20 @@ def doctor():
         elif default_db == "kuzudb":
             from importlib.util import find_spec
 
-            if find_spec("real_ladybug") is not None:
+            if find_spec("kuzu") is not None:
                 console.print(f"   [green]✓[/green] KuzuDB is installed")
             else:
                 console.print(f"   [red]✗[/red] KuzuDB is not installed")
-                console.print(f"       Run: pip install real_ladybug")
+                console.print(f"       Run: pip install kuzu")
+                all_checks_passed = False
+        elif default_db == "ladybugdb":
+            from importlib.util import find_spec
+
+            if find_spec("ladybug") is not None:
+                console.print(f"   [green]✓[/green] LadybugDB core (ladybug) is installed")
+            else:
+                console.print(f"   [red]✗[/red] LadybugDB core (ladybug) is not installed")
+                console.print(f"       Run: pip install ladybug")
                 all_checks_passed = False
         else:
             # FalkorDB
@@ -1036,13 +1119,6 @@ def doctor():
 
 
 
-@app.command()
-def start():
-    """
-    [DEPRECATED] Use 'cgc mcp start' instead. This command will be removed in a future version.
-    """
-    console.print("[yellow]⚠️  'cgc start' is deprecated. Use 'cgc mcp start' instead.[/yellow]")
-    mcp_start()
 
 
 @app.command()
@@ -1095,6 +1171,16 @@ def stats(
     if path:
         path = str(Path(path).resolve())
     stats_helper(path, context)
+
+@app.command("setup-scip")
+def setup_scip():
+    """
+    Check availability of SCIP indexers and provide installation hints.
+    
+    This command audits your system for SCIP binaries (like scip-python, scip-go)
+    and checks if Docker is available for fallback indexing.
+    """
+    setup_scip_helper()
 
 @app.command()
 def delete(
@@ -1331,17 +1417,22 @@ app.add_typer(find_app, name="find")
 @find_app.command("name")
 def find_by_name(
     ctx: typer.Context,
-    name: str = typer.Argument(..., help="Exact name to search for"),
+    name: str = typer.Argument(..., help="Name to search for"),
     type: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by type (function, class, file, module)"),
+    fuzzy: Optional[bool] = typer.Option(None, "--fuzzy/--no-fuzzy", help="Enable/disable fuzzy matching for this command. Overrides the FUZZY_SEARCH config value (default: true)."),
     visual: bool = typer.Option(False, "--visual", "--viz", "-V", help="Show results as interactive graph visualization"),
     context: Optional[str] = typer.Option(None, "--context", "-c", help="Specific context to use"),
 ):
     """
-    Find code elements by exact name.
-    
+    Find code elements by name.
+
+    Fuzzy matching is enabled by default (configurable via the FUZZY_SEARCH
+    config key, or per-invocation with --fuzzy / --no-fuzzy).
+
     Examples:
         cgc find name MyClass
         cgc find name calculate --type function
+        cgc find name MyClass --no-fuzzy
         cgc find name MyClass --visual
     """
     _load_credentials()
@@ -1349,14 +1440,22 @@ def find_by_name(
     if not all(services[:3]):
         return
     db_manager, graph_builder, code_finder = services[:3]
-    
+
+    # Resolve effective fuzzy setting: CLI flag wins, else config, else true.
+    if fuzzy is None:
+        from codegraphcontext.cli.config_manager import load_config
+        cfg_value = load_config().get("FUZZY_SEARCH", "true")
+        fuzzy_search = str(cfg_value).strip().lower() == "true"
+    else:
+        fuzzy_search = fuzzy
+
     try:
         results = []
-        
+
         # Search based on type filter
         if type is None or type.lower() == 'all':
-            funcs = code_finder.find_by_function_name(name, fuzzy_search=False)
-            classes = code_finder.find_by_class_name(name, fuzzy_search=False)
+            funcs = code_finder.find_by_function_name(name, fuzzy_search=fuzzy_search)
+            classes = code_finder.find_by_class_name(name, fuzzy_search=fuzzy_search)
             variables = code_finder.find_by_variable_name(name)
             modules = code_finder.find_by_module_name(name)
             imports = code_finder.find_imports(name)
@@ -1388,11 +1487,11 @@ def find_by_name(
                         results.append(row)
         
         elif type.lower() == 'function':
-            results = code_finder.find_by_function_name(name, fuzzy_search=False)
+            results = code_finder.find_by_function_name(name, fuzzy_search=fuzzy_search)
             for r in results: r['type'] = 'Function'
-            
+
         elif type.lower() == 'class':
-            results = code_finder.find_by_class_name(name, fuzzy_search=False)
+            results = code_finder.find_by_class_name(name, fuzzy_search=fuzzy_search)
             for r in results: r['type'] = 'Class'
             
         elif type.lower() == 'variable':
@@ -2169,10 +2268,10 @@ def analyze_inheritance_tree(
 
 @analyze_app.command("complexity")
 def analyze_complexity(
-    path: Optional[str] = typer.Argument(None, help="Specific function name to analyze"),
+    path: Optional[str] = typer.Argument(None, help="Function name or file path to analyze"),
     threshold: int = typer.Option(10, "--threshold", "-t", help="Complexity threshold for warnings"),
     limit: int = typer.Option(20, "--limit", "-l", help="Maximum results to show"),
-    file: Optional[str] = typer.Option(None, "--file", "-f", help="Specific file path (only used when function name is provided)"),
+    file: Optional[str] = typer.Option(None, "--file", "-f", help="Specific file path to scope analysis"),
     context: Optional[str] = typer.Option(None, "--context", "-c", help="Specific context to use"),
 ):
     """
@@ -2183,16 +2282,55 @@ def analyze_complexity(
         cgc analyze complexity --threshold 15     # Functions over threshold
         cgc analyze complexity my_function        # Specific function
         cgc analyze complexity my_function -f file.py # Specific function in file
+        cgc analyze complexity src/main.py        # Most complex functions in file
+        cgc analyze complexity main.py            # Most complex functions in file
+        cgc analyze complexity --file src/main.py # Alternative file syntax
     """
     _load_credentials()
     services = _initialize_services(context)
     if not all(services[:3]):
         return
     db_manager, graph_builder, code_finder = services[:3]
-    
+
+    _FILE_EXTENSIONS = ('.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.rb',
+                        '.java', '.cpp', '.c', '.cs', '.swift', '.kt', '.scala',
+                        '.php', '.lua', '.zig', '.ex', '.exs', '.r', '.m', '.sh')
+
+    def _is_file_path(value: str) -> bool:
+        if '/' in value or '\\' in value:
+            return True
+        return any(value.endswith(ext) for ext in _FILE_EXTENSIONS)
+
+    def _render_complexity_table(results, title):
+        if not results:
+            console.print("[yellow]No complexity data available for this file[/yellow]")
+            return
+        table = Table(show_header=True, header_style="bold magenta", box=box.ROUNDED)
+        table.add_column("Function", style="cyan")
+        table.add_column("Complexity", style="yellow", justify="right")
+        table.add_column("Location", style="dim", overflow="fold")
+        for func in results:
+            complexity = func.get('complexity', 0)
+            color = "red" if complexity > threshold else "yellow" if complexity > threshold/2 else "green"
+            fpath = func.get('path', '')
+            line_str = str(func.get('line_number', ''))
+            location_str = f"{fpath}:{line_str}" if line_str else fpath
+            table.add_row(
+                func.get('function_name', ''),
+                f"[{color}]{complexity}[/{color}]",
+                location_str
+            )
+        console.print(f"\n[bold cyan]{title}[/bold cyan]")
+        console.print(table)
+        console.print(f"\n[dim]{len([f for f in results if f.get('complexity', 0) > threshold])} function(s) exceed threshold[/dim]")
+
     try:
-        if path:
-            # Specific function
+        if path and _is_file_path(path):
+            # File path provided as positional argument
+            results = code_finder.find_most_complex_functions_in_file(path, limit)
+            _render_complexity_table(results, f"Most Complex Functions in '{path}' (threshold: {threshold}):")
+        elif path:
+            # Specific function name
             result = code_finder.get_cyclomatic_complexity(path, file)
             if result:
                 console.print(f"\n[bold cyan]Complexity for '{path}':[/bold cyan]")
@@ -2201,35 +2339,14 @@ def analyze_complexity(
                 console.print(f"  Line: [dim]{result.get('line_number', '')}[/dim]")
             else:
                 console.print(f"[yellow]Function '{path}' not found or has no complexity data[/yellow]")
+        elif file:
+            # --file option without positional arg
+            results = code_finder.find_most_complex_functions_in_file(file, limit)
+            _render_complexity_table(results, f"Most Complex Functions in '{file}' (threshold: {threshold}):")
         else:
-            # Most complex functions
+            # Global - most complex functions
             results = code_finder.find_most_complex_functions(limit)
-            
-            if not results:
-                console.print("[yellow]No complexity data available[/yellow]")
-                return
-            
-            table = Table(show_header=True, header_style="bold magenta", box=box.ROUNDED)
-            table.add_column("Function", style="cyan")
-            table.add_column("Complexity", style="yellow", justify="right")
-            table.add_column("Location", style="dim", overflow="fold")
-            
-            for func in results:
-                complexity = func.get('complexity', 0)
-                color = "red" if complexity > threshold else "yellow" if complexity > threshold/2 else "green"
-                path = func.get('path', '')
-                line_str = str(func.get('line_number', ''))
-                location_str = f"{path}:{line_str}" if line_str else path
-
-                table.add_row(
-                    func.get('function_name', ''),
-                    f"[{color}]{complexity}[/{color}]",
-                    location_str
-                )
-            
-            console.print(f"\n[bold cyan]Most Complex Functions (threshold: {threshold}):[/bold cyan]")
-            console.print(table)
-            console.print(f"\n[dim]{len([f for f in results if f.get('complexity', 0) > threshold])} function(s) exceed threshold[/dim]")
+            _render_complexity_table(results, f"Most Complex Functions (threshold: {threshold}):")
     finally:
         db_manager.close_driver()
 
@@ -2542,12 +2659,22 @@ def main(
         "-h",
         help="[Root-level only] Show help and exit",
         is_eager=True,
-    ), 
+    ),
+    db_path: Optional[str] = typer.Option(
+        None,
+        "--path",
+        "--db-path",
+        help="[Global] Temporarily override database path (for local DBs like KuzuDB)"
+    ),
 ):
     """
     Main entry point for the cgc CLI application.
     If no subcommand is provided, it displays a welcome message with instructions.
     """
+    if db_path:
+        os.environ["CGC_RUNTIME_DB_PATH"] = db_path
+    if database:
+        os.environ["CGC_RUNTIME_DB_TYPE"] = database
     # Initialize context object for sharing state with subcommands
     ctx.ensure_object(dict)
     
@@ -2560,6 +2687,10 @@ def main(
 
     if version_:
         console.print(f"CodeGraphContext [bold cyan]{get_version()}[/bold cyan]")
+        raise typer.Exit()
+    
+    if help_:
+        typer.echo(ctx.get_help())
         raise typer.Exit()
 
     if ctx.invoked_subcommand is None:

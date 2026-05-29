@@ -1,3 +1,4 @@
+# src/codegraphcontext/cli/setup_wizard.py
 from InquirerPy import prompt
 from rich.console import Console
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import shutil
 import yaml 
 from codegraphcontext.core.database import DatabaseManager
+from codegraphcontext.cli.config_manager import normalize_config_path
 
 console = Console()
 
@@ -513,17 +515,15 @@ def configure_mcp_client():
         except Exception:
             pass
     
-    # Add all configuration values, converting relative paths to absolute
+    # Add all configuration values, normalizing path-related settings
     for key, value in config.items():
         # Skip database credentials (already added above)
         if key in ["NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD"]:
             continue
         
-        # Convert relative paths to absolute for path-related configs
+        # Expand ~/$VARS and convert relative paths to absolute for MCP env
         if "PATH" in key and value:
-            path_obj = Path(value)
-            if not path_obj.is_absolute():
-                value = str(path_obj.resolve())
+            value = normalize_config_path(value, absolute=True)
         
         env_vars[key] = value
     

@@ -1,3 +1,4 @@
+# src/codegraphcontext/tools/indexing/scip_pipeline.py
 """SCIP-based indexing orchestration."""
 
 from __future__ import annotations
@@ -44,8 +45,9 @@ async def run_scip_index_async(
     if job_id:
         job_manager.update_job(job_id, status=JobStatus.RUNNING)
 
-    writer.add_repository_to_graph(path, is_dependency)
-    repo_name = path.name
+    repo_root = path if path.is_dir() else path.parent.resolve()
+    writer.add_repository_to_graph(repo_root, is_dependency)
+    repo_name = repo_root.name
 
     try:
         with tempfile.TemporaryDirectory(prefix="cgc_scip_") as tmpdir:
@@ -72,7 +74,7 @@ async def run_scip_index_async(
             job_manager.update_job(job_id, total_files=len(files_data))
 
         processed = 0
-        index_root = path.resolve()
+        index_root = path.resolve() if path.is_dir() else path.parent.resolve()
         for abs_path_str, file_data in files_data.items():
             file_path = Path(abs_path_str)
             if file_path.is_file() and file_path_has_ignore_dir_segment(file_path, index_root):
@@ -144,13 +146,15 @@ async def run_scip_index_async(
         # and index them via Tree-sitter so the graph has full coverage.
         scip_abs_paths = set(files_data.keys())
         supplemented = 0
-        for repo_file in sorted(index_root.rglob("*")):
-            if not repo_file.is_file():
-                continue
+        from .discovery import discover_files_to_index
+        supplementary_files, _ = discover_files_to_index(
+            index_root,
+            cgcignore_path=None,
+            supported_extensions=set(parsers_keys),
+        )
+        for repo_file in supplementary_files:
             abs_str = str(repo_file.resolve())
             if abs_str in scip_abs_paths:
-                continue
-            if file_path_has_ignore_dir_segment(repo_file, index_root):
                 continue
             ts_parser = get_parser(repo_file.suffix)
             if not ts_parser:

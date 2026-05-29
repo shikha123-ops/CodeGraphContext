@@ -160,6 +160,7 @@ def test_class_calls_use_target_line_in_kuzu(tmp_path):
 
         writer = GraphWriter(driver)
         writer.write_function_call_groups(
+            [],
             [
                 {
                     "type": "function",

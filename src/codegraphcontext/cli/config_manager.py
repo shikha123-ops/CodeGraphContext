@@ -1,3 +1,4 @@
+# src/codegraphcontext/cli/config_manager.py
 """
 Configuration management for CodeGraphContext.
 Handles reading, writing, and validating configuration settings.
@@ -29,6 +30,7 @@ DEFAULT_CONFIG = {
     "DEFAULT_DATABASE": "falkordb",
     "FALKORDB_PATH": str(CONFIG_DIR / "global" / "db" / "falkordb"),
     "FALKORDB_SOCKET_PATH": str(CONFIG_DIR / "global" / "db" / "falkordb.sock"),
+    "LADYBUGDB_PATH": str(CONFIG_DIR / "global" / "db" / "ladybugdb"),
     "INDEX_VARIABLES": "true",
     "ALLOW_DB_DELETION": "false",
     "DEBUG_LOGS": "false",
@@ -60,13 +62,16 @@ DEFAULT_CONFIG = {
     "ENABLE_VECTOR_RESOLVE": "false",
     "CGC_EMBEDDING_MODEL": "local",
     "CGC_EMBEDDING_BATCH_SIZE": "256",
+    # Default fuzzy matching behavior for `cgc find name` (overridable per-command with --fuzzy/--no-fuzzy)
+    "FUZZY_SEARCH": "true",
 }
 
 # Configuration key descriptions
 CONFIG_DESCRIPTIONS = {
-    "DEFAULT_DATABASE": "Default database backend (neo4j|falkordb|kuzudb|nornic)",
+    "DEFAULT_DATABASE": "Default database backend (neo4j|falkordb|falkordb-remote|kuzudb|nornic|ladybugdb)",
     "FALKORDB_PATH": "Path to FalkorDB database file",
     "FALKORDB_SOCKET_PATH": "Path to FalkorDB Unix socket",
+    "LADYBUGDB_PATH": "Path to LadybugDB database directory",
     "INDEX_VARIABLES": "Index variable nodes in the graph (lighter graph if false)",
     "ALLOW_DB_DELETION": "Allow full database deletion commands",
     "DEBUG_LOGS": "Enable debug logging (for development/troubleshooting)",
@@ -120,11 +125,15 @@ CONFIG_DESCRIPTIONS = {
         "Number of function texts to embed per batch when ENABLE_VECTOR_RESOLVE=true. "
         "Larger values are faster but use more RAM. Default: 256. Reduce to 64 if you hit memory errors."
     ),
+    "FUZZY_SEARCH": (
+        "Enable fuzzy matching by default for `cgc find name` (true|false). "
+        "Per-invocation overrides are available via --fuzzy / --no-fuzzy."
+    ),
 }
 
 # Valid values for each config key
 CONFIG_VALIDATORS = {
-    "DEFAULT_DATABASE": ["neo4j", "falkordb", "falkordb-remote", "kuzudb", "nornic"],
+    "DEFAULT_DATABASE": ["neo4j", "falkordb", "falkordb-remote", "kuzudb", "nornic", "ladybugdb"],
     "INDEX_VARIABLES": ["true", "false"],
     "ALLOW_DB_DELETION": ["true", "false"],
     "DEBUG_LOGS": ["true", "false"],
@@ -140,6 +149,7 @@ CONFIG_VALIDATORS = {
     "ENABLE_INHERIT_RESOLVE": ["true", "false"],
     "ENABLE_VECTOR_RESOLVE": ["true", "false"],
     "CGC_EMBEDDING_MODEL": ["local", "openai"],
+    "FUZZY_SEARCH": ["true", "false"],
 }
 DEFAULT_CGCIGNORE_PATTERNS = """\
 # Default .cgcignore patterns
@@ -168,6 +178,21 @@ __pycache__/
 coverage/
 .next/
 """
+
+
+def normalize_config_path(value: str, *, absolute: bool = False, base_dir: Optional[Path] = None) -> str:
+    """Normalize config path values.
+
+    - Expands ``~`` and environment variables.
+    - Optionally resolves to an absolute path.
+    """
+    expanded = os.path.expandvars(os.path.expanduser(str(value)))
+    path_obj = Path(expanded)
+    if absolute and not path_obj.is_absolute():
+        path_obj = (base_dir or Path.cwd()) / path_obj
+    if absolute:
+        return str(path_obj.resolve())
+    return str(path_obj)
 
 
 def ensure_config_dir(path: Path = CONFIG_DIR):
@@ -423,15 +448,15 @@ def validate_config_value(key: str, value: str) -> tuple[bool, Optional[str]]:
     
     if key in ("LOG_FILE_PATH", "DEBUG_LOG_PATH"):
         # Validate path is writable
-        log_path = Path(value)
+        log_path = Path(normalize_config_path(value, absolute=True))
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             return False, f"Cannot create log directory: {e}"
     
-    if key in ("FALKORDB_PATH", "FALKORDB_SOCKET_PATH"):
+    if key in ("FALKORDB_PATH", "FALKORDB_SOCKET_PATH", "LADYBUGDB_PATH"):
         # Validate path is writable
-        db_path = Path(value)
+        db_path = Path(normalize_config_path(value, absolute=True))
         try:
             db_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -634,10 +659,17 @@ def _default_global_db_path(database: str) -> str:
     """Return the canonical DB path for the global context.
 
     New layout: ``~/.codegraphcontext/global/db/<backend>/``
-    For backward-compat, if the legacy flat path exists we keep using it.
+    For backward-compat, we check:
+    1. FALKORDB_PATH in config (if database is falkordb)
+    2. Legacy flat path
+    3. New layout default
     """
-    if database == "falkordb" and _LEGACY_FALKORDB_PATH.exists():
-        return str(_LEGACY_FALKORDB_PATH)
+    if database == "falkordb":
+        custom_path = load_config().get("FALKORDB_PATH")
+        if custom_path:
+            return str(Path(custom_path).resolve())
+        if _LEGACY_FALKORDB_PATH.exists():
+            return str(_LEGACY_FALKORDB_PATH)
     return str(CONFIG_DIR / "global" / "db" / database)
 
 
@@ -859,7 +891,7 @@ def resolve_context(
             )
 
     # --- 4. Global fallback ---
-    db = load_config().get("DEFAULT_DATABASE", "falkordb")
+    db = os.getenv("CGC_RUNTIME_DB_TYPE") or load_config().get("DEFAULT_DATABASE", "falkordb")
     return ResolvedContext(
         mode="global",
         context_name="",
