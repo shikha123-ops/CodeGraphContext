@@ -101,6 +101,12 @@ def get_database_manager(db_path: Optional[str] = None) -> Union['DatabaseManage
             from .database_falkordb import FalkorDBManager, FalkorDBUnavailableError
             try:
                 mgr = FalkorDBManager(db_path=db_path)
+                # Eagerly probe the connection so any FalkorDBUnavailableError
+                # (e.g. redis-py/falkordblite version mismatch — issue #1035)
+                # surfaces *here*, while we can still fall back to KùzuDB.
+                # ``get_driver`` is idempotent (singleton-guarded), so the
+                # subsequent real call from server.py costs nothing.
+                mgr.get_driver()
                 info_logger(f"Using FalkorDB Lite (explicit) at {db_path or 'default path'}")
                 return mgr
             except FalkorDBUnavailableError as falkor_err:
@@ -153,6 +159,9 @@ def get_database_manager(db_path: Optional[str] = None) -> Union['DatabaseManage
         from .database_falkordb import FalkorDBManager, FalkorDBUnavailableError
         try:
             mgr = FalkorDBManager(db_path=db_path)
+            # Eagerly probe so dep/version failures (issue #1035) surface here
+            # while we can still fall through to KùzuDB below.
+            mgr.get_driver()
             info_logger(f"Using FalkorDB Lite (default) at {db_path or 'default path'}")
             return mgr
         except FalkorDBUnavailableError as falkor_err:
